@@ -169,3 +169,29 @@ def test_salvage_parses_kwargs_style_leak():
     call = salvage_tool_call("focus_lens[node_ids=[6,5]]")
     assert call.function.name == "focus_lens"
     assert json.loads(call.function.arguments) == {"node_ids": [6, 5]}
+
+
+def test_search_tasks_tool_returns_ids_for_followup():
+    models.add_node("Colour grade The Cage final cut")
+    models.add_node("Walk the dog")
+    result = json.loads(execute_tool_call(fake_call("search_tasks", {"query": "cage grade"})))
+    assert result["results"][0]["content"] == "Colour grade The Cage final cut"
+    assert "focus_lens" in result["hint"]
+    empty = json.loads(execute_tool_call(fake_call("search_tasks", {"query": "zzzqqq"})))
+    assert empty["results"] == []
+
+
+def test_grounding_rejects_unseen_ids_and_allows_seen():
+    from app.engine import brain
+    brain.reset_session()
+    real = models.add_node("Grounded task")
+    result = json.loads(execute_tool_call(
+        fake_call("focus_lens", {"node_ids": [real]}), enforce_grounding=True))
+    assert "error" in result and "search_tasks" in result["error"]
+
+    search = json.loads(execute_tool_call(fake_call("search_tasks", {"query": "grounded"})))
+    assert search["results"][0]["id"] == real
+    result = json.loads(execute_tool_call(
+        fake_call("focus_lens", {"node_ids": [real]}), enforce_grounding=True))
+    assert result["success"]
+    brain.reset_session()

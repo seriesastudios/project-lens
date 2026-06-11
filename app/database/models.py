@@ -1,3 +1,4 @@
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import List, Dict, Any, Optional
@@ -83,6 +84,31 @@ def init_db():
         for column, definition in _MIGRATION_COLUMNS:
             if column not in existing:
                 cursor.execute(f"ALTER TABLE nodes ADD COLUMN {column} {definition}")
+
+        # Full-text index over node content (porter stemming: "sent" matches "send").
+        # Tasks live in the DB; the brain retrieves only what's relevant per message.
+        cursor.execute('''
+            CREATE VIRTUAL TABLE IF NOT EXISTS nodes_fts USING fts5(
+                content, content='nodes', content_rowid='id', tokenize='porter unicode61')
+        ''')
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS nodes_fts_insert AFTER INSERT ON nodes BEGIN
+                INSERT INTO nodes_fts(rowid, content) VALUES (new.id, new.content);
+            END
+        ''')
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS nodes_fts_delete AFTER DELETE ON nodes BEGIN
+                INSERT INTO nodes_fts(nodes_fts, rowid, content) VALUES ('delete', old.id, old.content);
+            END
+        ''')
+        cursor.execute('''
+            CREATE TRIGGER IF NOT EXISTS nodes_fts_update AFTER UPDATE OF content ON nodes BEGIN
+                INSERT INTO nodes_fts(nodes_fts, rowid, content) VALUES ('delete', old.id, old.content);
+                INSERT INTO nodes_fts(rowid, content) VALUES (new.id, new.content);
+            END
+        ''')
+        # Sync rows that predate the index (cheap at this scale)
+        cursor.execute("INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild')")
 
 
 def add_node(content: str, status: str = 'active', target_date: Optional[str] = None,
@@ -199,6 +225,38 @@ def get_active_nodes(limit: Optional[int] = None) -> List[Dict[str, Any]]:
         query += f" LIMIT {int(limit)}"
     with DatabaseSession() as conn:
         return [dict(row) for row in conn.execute(query).fetchall()]
+
+
+# Generic words that would make every task a "match" in an OR query
+_STOPWORDS = {
+    "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "at", "is",
+    "it", "its", "im", "ive", "just", "that", "this", "these", "those", "my",
+    "me", "we", "our", "you", "your", "was", "were", "be", "been", "am", "are",
+    "do", "did", "have", "has", "had", "with", "off", "up", "out", "by", "as",
+    "so", "now", "then", "what", "whats", "when", "where", "which", "who",
+    "how", "can", "could", "should", "would", "will", "dont", "didnt", "cant",
+    "also", "please", "okay", "ok", "about", "all", "any", "some", "more",
+    "really", "actually", "instead", "task", "tasks", "todo",
+}
+
+
+def search_active_nodes(text: str, limit: int = 15) -> List[Dict[str, Any]]:
+    """Full-text search of active nodes against free-form user text.
+    Meaningful words are OR-ed so any overlap surfaces a candidate."""
+    words = [w for w in re.findall(r"[A-Za-z0-9]{2,}", text or "")
+             if w.lower() not in _STOPWORDS]
+    if not words:
+        return []
+    query = " OR ".join(words)
+    with DatabaseSession() as conn:
+        rows = conn.execute(
+            '''SELECT n.* FROM nodes n
+               JOIN nodes_fts f ON n.id = f.rowid
+               WHERE nodes_fts MATCH ? AND n.status = 'active'
+               ORDER BY rank LIMIT ?''',
+            (query, limit)
+        ).fetchall()
+        return [dict(row) for row in rows]
 
 
 def get_all_edges() -> List[Dict[str, Any]]:

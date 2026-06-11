@@ -10,7 +10,7 @@ Design rules:
 import json
 import re
 from collections import deque
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
 import calendar as _calendar
@@ -34,7 +34,7 @@ HISTORY_TURNS = 20  # user+assistant messages kept as session memory
 # instead of emitting a real one. LM Studio ignores tool_choice="required" and
 # corrective retries come back empty, so we salvage by parsing the leaked text.
 TOOL_NAME_LEAK = re.compile(
-    r"\b(capture_tasks|complete_tasks|update_task|link_tasks|focus_lens|clear_focus)\b")
+    r"\b(capture_tasks|complete_tasks|update_task|link_tasks|focus_lens|clear_focus|search_tasks)\b")
 
 
 class _SalvagedFunction:
@@ -108,6 +108,11 @@ def salvage_tool_call(text: str) -> Optional[_SalvagedCall]:
 # Rolling session memory (in-process; this is a single-user local app)
 conversation_history: deque = deque(maxlen=HISTORY_TURNS)
 
+# Grounding: every node ID the model has actually been shown this session
+# (context injections, search results, its own captures). Tool calls that
+# reference IDs outside this set are rejected — the model must search, not guess.
+seen_node_ids: set = set()
+
 
 # ---------------------------------------------------------------------------
 # System prompt
@@ -131,8 +136,9 @@ RULES
 3. The user finished something → call complete_tasks with ALL matching IDs from ACTIVE TASKS, in one call. Match loosely: "sent the invoices" matches "Send invoices to clients". Never create a task for finished work; if nothing matches, ask one short question.
 4. Reword, change deadline, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change.
 5. A dependency or grouping is stated → call link_tasks. For "X blocks Y", X is parent_id. Use is_part_of for project/subtask grouping.
-6. The user asks to focus on something, asks what their tasks are, or asks what to work on → call focus_lens with ALL matching active IDs (include a project's subtasks). NEVER list tasks in chat — the Lens shows them. Call clear_focus when asked to clear or reset the Lens.
+6. The user asks to focus on something, asks what their tasks are, or asks what to work on → call focus_lens with ALL matching active IDs (include a project's subtasks). Category words ("errands", "chores", "admin", "work stuff") → judge which ACTIVE TASKS fit the category yourself and pass those IDs. NEVER list tasks in chat — the Lens shows them. Call clear_focus when asked to clear or reset the Lens.
 7. "that", "it", "the second one" → resolve from the recent conversation and ACTIVE TASKS; if genuinely ambiguous, ask one short question — never guess an ID. A correction ("no, I meant Friday") → call update_task on the existing task, never capture a new one.
+8. ACTIVE TASKS is only the slice of the database relevant to this conversation. If the user refers to an EXISTING task or project that is NOT listed, call search_tasks with 2-3 keywords first, then act on the results. Never claim a task doesn't exist without searching. Do NOT search before capturing new work — rule 1 applies directly.
 
 Reply in plain text ONLY when no rule applies: a single-fact question (one deadline, one status), a greeting, venting, or reflection — answer briefly, capture nothing. For mixed messages, call tools for the actionable part only."""
 
@@ -155,13 +161,63 @@ def _calendar_table(now: datetime, days: int = 14) -> str:
     return "\n".join(lines)
 
 
-def format_system_prompt() -> str:
+# Below this many active tasks, just show them all; above it, retrieve a
+# relevant subset so the prompt stays small no matter how large the graph grows.
+CONTEXT_FULL_THRESHOLD = 25
+CONTEXT_MAX_TASKS = 30
+
+
+def select_context_tasks(active_nodes: List[dict], conversation_text: str,
+                         now: Optional[datetime] = None) -> List[dict]:
+    """Tasks live in the database; the prompt gets only what this turn could
+    plausibly touch: focused tasks, near deadlines, fresh captures, and
+    full-text matches against the recent conversation."""
+    if len(active_nodes) <= CONTEXT_FULL_THRESHOLD:
+        return active_nodes
+
+    from app.engine import scoring
+    now = now or datetime.now(timezone.utc)
+    today = datetime.now().date()
+
+    # Priority buckets: when the cap bites, conversation matches and focused
+    # tasks survive; "recently captured" noise is the first to drop.
+    focused, matched, due_soon, recent = [], [], [], []
+    matched_ids = {n["id"] for n in models.search_active_nodes(conversation_text, limit=15)}
+
+    for node in active_nodes:
+        deadline = scoring._parse_deadline(node.get("target_date"))
+        if scoring._effective_focus(node, now) > 0:
+            focused.append(node)
+        elif node["id"] in matched_ids:
+            matched.append(node)
+        elif deadline is not None and (deadline - today).days <= scoring.DEADLINE_WINDOW_DAYS:
+            due_soon.append(node)
+        elif scoring._recency_score(node, now) > 0:
+            recent.append(node)
+
+    # Recent captures are a courtesy (FTS on the conversation usually re-finds
+    # them anyway); cap them so a bulk seed doesn't flood the prompt.
+    return (focused + matched + due_soon + recent[-10:])[:CONTEXT_MAX_TASKS]
+
+
+def format_system_prompt(user_text: str = "") -> str:
     now = datetime.now()
     active_nodes = models.get_active_nodes()
 
-    if active_nodes:
+    # Search against the latest message plus recent user turns, so references
+    # like "that one" still surface the task discussed a moment ago.
+    recent_user_text = " ".join(
+        msg["content"] for msg in list(conversation_history)[-6:]
+        if isinstance(msg, dict) and msg.get("role") == "user"
+    )
+    context_nodes = select_context_tasks(active_nodes, f"{user_text} {recent_user_text}")
+
+    seen_node_ids.update(n["id"] for n in context_nodes)
+    seen_node_ids.update(n["id"] for n in active_nodes if (n.get("focus_score") or 0) > 0)
+
+    if context_nodes:
         lines = []
-        for node in active_nodes:
+        for node in context_nodes:
             parts = [f"[ID {node['id']}]", node["content"]]
             if node.get("node_type") == "project":
                 parts.append("(project)")
@@ -169,11 +225,16 @@ def format_system_prompt() -> str:
                 parts.append(f"(due {node['target_date']})")
             lines.append(" ".join(parts))
         task_list = "\n".join(lines)
-        focused = [f"[ID {n['id']}] {n['content']}" for n in active_nodes if (n.get("focus_score") or 0) > 0]
-        focus_list = "; ".join(focused) if focused else "nothing"
+        if len(context_nodes) < len(active_nodes):
+            task_list += (f"\n(+{len(active_nodes) - len(context_nodes)} more active tasks "
+                          "in the database, omitted as unrelated to this conversation)")
+    elif active_nodes:
+        task_list = f"None relevant to this conversation ({len(active_nodes)} active tasks in the database)."
     else:
         task_list = "No active tasks."
-        focus_list = "nothing"
+
+    focused = [f"[ID {n['id']}] {n['content']}" for n in active_nodes if (n.get("focus_score") or 0) > 0]
+    focus_list = "; ".join(focused) if focused else "nothing"
 
     return SYSTEM_PROMPT_TEMPLATE.format(
         now=now.strftime("%A, %Y-%m-%d %H:%M"),
@@ -293,6 +354,10 @@ class FocusLensArgs(BaseModel):
     node_ids: List[int] = Field(min_length=1)
 
 
+class SearchTasksArgs(BaseModel):
+    query: str = Field(min_length=1)
+
+
 LENS_TOOLS: Any = [
     {
         "type": "function",
@@ -390,6 +455,20 @@ LENS_TOOLS: Any = [
             "description": "Clear the Lens focus so it returns to showing only deadline-driven items. Use when the user asks to clear/reset the Lens.",
             "parameters": {"type": "object", "properties": {}}
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "search_tasks",
+            "description": "Search the task database by keywords. Use when the user mentions a task or project that is not in the ACTIVE TASKS list — search first, then act on the returned IDs.",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "2-3 distinctive keywords from the user's request (e.g. 'cage film', 'invoices')."}
+                },
+                "required": ["query"]
+            }
+        }
     }
 ]
 
@@ -421,6 +500,7 @@ def _execute_capture(args: CaptureTasksArgs) -> dict:
             node_id = models.add_node(content=item.content, target_date=item.deadline, node_type=item.node_type)
             created.append({"id": node_id, "content": item.content,
                             "deadline": item.deadline or "none"})
+        seen_node_ids.add(node_id)
         if item.parent_id is not None:
             models.add_edge(parent_id=item.parent_id, child_id=node_id, relationship=item.relationship)
         for subtask in item.subtasks:
@@ -433,6 +513,7 @@ def _execute_capture(args: CaptureTasksArgs) -> dict:
             child_id = models.add_node(content=subtask, node_type="task")
             models.add_edge(parent_id=node_id, child_id=child_id, relationship="is_part_of")
             created.append({"id": child_id, "content": subtask})
+            seen_node_ids.add(child_id)
 
     result = {"success": True, "created": created}
     if skipped:
@@ -481,17 +562,50 @@ def _execute_clear_focus() -> dict:
     return {"success": True}
 
 
+def _execute_search(args: SearchTasksArgs) -> dict:
+    results = models.search_active_nodes(args.query, limit=15)
+    seen_node_ids.update(n["id"] for n in results)
+    return {
+        "results": [
+            {"id": n["id"], "content": n["content"],
+             **({"due": n["target_date"]} if n.get("target_date") else {})}
+            for n in results
+        ],
+        "hint": "Use these IDs with focus_lens / complete_tasks / update_task / link_tasks."
+        if results else ("No matches in the database. If the user is describing NEW work, "
+                         "call capture_tasks now. If they referred to an existing task, "
+                         "try other keywords or tell them it wasn't found."),
+    }
+
+
 TOOL_HANDLERS = {
     "capture_tasks": (CaptureTasksArgs, _execute_capture),
     "complete_tasks": (CompleteTasksArgs, _execute_complete),
     "update_task": (UpdateTaskArgs, _execute_update),
     "link_tasks": (LinkTasksArgs, _execute_link),
     "focus_lens": (FocusLensArgs, _execute_focus),
+    "search_tasks": (SearchTasksArgs, _execute_search),
 }
 
 
-def execute_tool_call(call) -> str:
-    """Validates and executes one tool call; returns a JSON result string for the model."""
+def _referenced_ids(func_name: str, args) -> List[int]:
+    if func_name in ("complete_tasks", "focus_lens"):
+        return list(args.node_ids)
+    if func_name == "update_task":
+        return [args.node_id]
+    if func_name == "link_tasks":
+        return [args.parent_id, args.child_id]
+    if func_name == "capture_tasks":
+        return [item.parent_id for item in args.tasks if item.parent_id is not None]
+    return []
+
+
+def execute_tool_call(call, enforce_grounding: bool = False) -> str:
+    """Validates and executes one tool call; returns a JSON result string for the model.
+
+    With enforce_grounding, any referenced node ID the model was never shown
+    (context, search results, own captures) is rejected — models guess
+    plausible-looking IDs, and a guessed ID can hit the wrong real task."""
     func_name = call.function.name
 
     if func_name == "clear_focus":
@@ -513,6 +627,14 @@ def execute_tool_call(call) -> str:
         issues = "; ".join(f"{'.'.join(str(loc) for loc in e['loc'])}: {e['msg']}" for e in exc.errors())
         return json.dumps({"error": f"Invalid arguments: {issues}"})
 
+    if enforce_grounding:
+        unseen = [i for i in _referenced_ids(func_name, args) if i not in seen_node_ids]
+        if unseen:
+            return json.dumps({"error": (
+                f"IDs {unseen} are not in your ACTIVE TASKS or any search result — do not "
+                "guess IDs. Call search_tasks with keywords from the user's request, then "
+                "use the IDs it returns.")})
+
     try:
         return json.dumps(executor(args))
     except Exception as exc:
@@ -525,8 +647,9 @@ def execute_tool_call(call) -> str:
 
 async def process_user_input(user_text: str) -> str:
     """Runs the tool-calling loop and returns the assistant's reply text."""
+    messages: List[Any] = [{"role": "system", "content": format_system_prompt(user_text)}]
     conversation_history.append({"role": "user", "content": user_text})
-    messages: List[Any] = [{"role": "system", "content": format_system_prompt()}] + list(conversation_history)
+    messages += list(conversation_history)
 
     reply = None
     ran_tools = False
@@ -553,9 +676,18 @@ async def process_user_input(user_text: str) -> str:
         if not tool_calls:
             content = message.content or ""
             salvaged = None
-            if not ran_tools and not salvage_attempted:
+            if not salvage_attempted and TOOL_NAME_LEAK.search(content):
                 salvage_attempted = True
                 salvaged = salvage_tool_call(content)
+                if salvaged is None:
+                    # Leak detected but unparseable ("focus_lens with the errand
+                    # tasks...") — nudge once and let the model emit it properly.
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "system", "content": (
+                        "You described a tool call in plain text — nothing happened. "
+                        "Now CALL the tool for real, with arguments matching its schema "
+                        "and IDs from ACTIVE TASKS.")})
+                    continue
             if salvaged is None:
                 if not ran_tools:
                     reply = content  # no rule applied; the plain answer IS the reply
@@ -582,7 +714,7 @@ async def process_user_input(user_text: str) -> str:
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "name": tool_call.function.name,
-                "content": execute_tool_call(tool_call),
+                "content": execute_tool_call(tool_call, enforce_grounding=True),
             })
 
     # Stage 2 — speak. After tools ran, generate the user-facing confirmation
@@ -606,3 +738,4 @@ async def process_user_input(user_text: str) -> str:
 def reset_session():
     """Clears in-memory conversation state (used by tests and on server restart)."""
     conversation_history.clear()
+    seen_node_ids.clear()

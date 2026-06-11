@@ -24,8 +24,7 @@ from app.database import models
 from app.engine import brain
 
 
-def seed():
-    models.init_db()
+def seed_tasks():
     website = models.add_node("Website redesign", node_type="project")
     mockups = models.add_node("Finish Figma mockups", target_date="2026-06-15")
     landing = models.add_node("Build landing page")
@@ -39,25 +38,59 @@ def seed():
             "invoices": invoices, "dentist": dentist, "groceries": groceries}
 
 
-async def first_response(user_text):
-    """Mirrors the app's stage-1 decision call, including the tool-name-leak salvage."""
+async def run_decision_stage(user_text, max_rounds=4):
+    """Mirrors the app's stage-1 loop: multi-round tool calling with execution,
+    leak salvage, and grounding. Returns every successfully EXECUTED call."""
+    brain.reset_session()
     messages = [
-        {"role": "system", "content": brain.format_system_prompt()},
+        {"role": "system", "content": brain.format_system_prompt(user_text)},
         {"role": "user", "content": user_text},
     ]
-    response = await brain.client.chat.completions.create(
-        model=config.AI_MODEL_NAME, messages=messages,
-        tools=brain.LENS_TOOLS, tool_choice="auto", temperature=0.2,
-    )
-    message = response.choices[0].message
-    tool_calls = list(message.tool_calls or [])
-    if not tool_calls:
-        salvaged = brain.salvage_tool_call(message.content or "")
-        if salvaged:
-            tool_calls = [salvaged]
-    calls = [(c.function.name, json.loads(c.function.arguments or "{}"))
-             for c in tool_calls]
-    return calls, message.content or ""
+    executed = []
+    final_text = ""
+    salvage_attempted = False
+    ran_tools = False
+
+    for _ in range(max_rounds):
+        response = await brain.client.chat.completions.create(
+            model=config.AI_MODEL_NAME, messages=messages,
+            tools=brain.LENS_TOOLS, tool_choice="auto", temperature=0.2,
+        )
+        message = response.choices[0].message
+        tool_calls = list(message.tool_calls or [])
+
+        if not tool_calls:
+            content = message.content or ""
+            if not salvage_attempted and brain.TOOL_NAME_LEAK.search(content):
+                salvage_attempted = True
+                salvaged = brain.salvage_tool_call(content)
+                if salvaged is None:
+                    messages.append({"role": "assistant", "content": content})
+                    messages.append({"role": "system", "content": (
+                        "You described a tool call in plain text — nothing happened. "
+                        "Now CALL the tool for real, with arguments matching its schema "
+                        "and IDs from ACTIVE TASKS.")})
+                    continue
+                tool_calls = [salvaged]
+                messages.append({"role": "assistant", "content": None, "tool_calls": [{
+                    "id": salvaged.id, "type": "function",
+                    "function": {"name": salvaged.function.name,
+                                 "arguments": salvaged.function.arguments}}]})
+            else:
+                final_text = content
+                break
+        else:
+            messages.append(message)
+
+        ran_tools = True
+        for c in tool_calls:
+            result = brain.execute_tool_call(c, enforce_grounding=True)
+            if "error" not in json.loads(result):
+                executed.append((c.function.name, json.loads(c.function.arguments or "{}")))
+            messages.append({"role": "tool", "tool_call_id": c.id,
+                             "name": c.function.name, "content": result})
+
+    return executed, final_text
 
 
 def build_cases(ids):
@@ -75,7 +108,9 @@ def build_cases(ids):
         return check
 
     def expect_no_tool(calls, text):
-        return True if not calls else f"expected no tool, got {[t for t, _ in calls]}"
+        # search_tasks is read-only; only mutations count as wrongly acting
+        mutating = [t for t, _ in calls if t != "search_tasks"]
+        return True if not mutating else f"expected no action, got {mutating}"
 
     return [
         ("capture single + deadline", "I need to renew my passport before my Japan trip in September",
@@ -111,18 +146,29 @@ def build_cases(ids):
     ]
 
 
+def reset_db():
+    with models.DatabaseSession() as conn:
+        conn.execute("DELETE FROM edges")
+        conn.execute("DELETE FROM nodes")
+        conn.execute("DELETE FROM history_digest")
+
+
 async def main():
     passes = int(sys.argv[1]) if len(sys.argv) > 1 else 2
-    ids = seed()
-    cases = build_cases(ids)
+    models.init_db()
+    case_count = len(build_cases({k: 0 for k in
+                                  ("website", "mockups", "landing", "invoices", "dentist", "groceries")}))
     failures = 0
 
-    for label, message, checker in cases:
-        results = []
+    for index in range(case_count):
+        results, label = [], ""
         for _ in range(passes):
-            calls, text = await first_response(message)
-            verdict = checker(calls, text)
-            results.append(verdict)
+            # Tools now execute for real, so every pass gets a fresh seeded DB
+            reset_db()
+            ids = seed_tasks()
+            label, message, checker = build_cases(ids)[index]
+            calls, text = await run_decision_stage(message)
+            results.append(checker(calls, text))
         ok = sum(1 for v in results if v is True)
         status = "PASS" if ok == passes else ("FLAKY" if ok else "FAIL")
         if ok < passes:
@@ -130,7 +176,7 @@ async def main():
         detail = "" if ok == passes else "  " + "; ".join(str(v) for v in results if v is not True)
         print(f"{status:5} {ok}/{passes}  {label}{detail}")
 
-    print(f"\n{len(cases) - failures}/{len(cases)} situations fully reliable")
+    print(f"\n{case_count - failures}/{case_count} situations fully reliable")
     os.unlink(_tmp.name)
 
 
