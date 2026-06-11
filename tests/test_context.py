@@ -50,7 +50,7 @@ def test_large_graphs_get_relevant_subset_only():
 
 def test_prompt_notes_omitted_tasks():
     seed_many()
-    prompt = brain.format_system_prompt("I just sent the invoices")
+    prompt = brain.format_context_prompt("I just sent the invoices")
     assert "Send invoices to clients" in prompt
     assert "more active tasks" in prompt
     assert "Generic background chore number 7" not in prompt

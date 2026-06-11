@@ -127,14 +127,13 @@
         const nodeContainer = document.getElementById('node-container');
         const sendBtn = document.getElementById('send-btn');
 
-        // Pastel tokens keyed by the category the backend computed for each card
-        // (focus = conversation spotlight, next = imminent/blocker, horizon = upcoming
-        // deadline, admin = everything else that qualified).
+        // Card wash = URGENCY (when is this due?). Priority is the edge stripe,
+        // focus is the amber dot — three independent visual channels.
         const CATEGORY_TOKENS = {
-            focus:   'bg-orange-50 text-orange-950 border-orange-200/60 shadow-[0_4px_20px_-4px_rgba(255,237,213,0.5)]',
-            next:    'bg-amber-50/70 text-amber-950 border-amber-200/40 shadow-sm',
-            horizon: 'bg-emerald-50/60 text-emerald-950 border-emerald-200/30',
-            admin:   'bg-indigo-50/50 text-indigo-950 border-indigo-200/30 opacity-90',
+            next:    'bg-orange-50 text-orange-950 border-orange-200/60 shadow-[0_4px_20px_-4px_rgba(255,237,213,0.5)]',  // overdue / ≤2 days
+            soon:    'bg-amber-50/70 text-amber-950 border-amber-200/40 shadow-sm',   // this week
+            horizon: 'bg-emerald-50/60 text-emerald-950 border-emerald-200/30',       // dated, further out
+            undated: 'bg-white text-gray-700 border-gray-200/70',                      // no deadline
         };
 
         const formatDeadline = (value) => {
@@ -152,7 +151,7 @@
           : node.priority === 'low'  ? 'border-l-4 border-l-gray-300 opacity-75' : '';
 
         const buildCard = (node, index, chipName) => {
-            const colorClass = CATEGORY_TOKENS[node.category] || CATEGORY_TOKENS.admin;
+            const colorClass = CATEGORY_TOKENS[node.category] || CATEGORY_TOKENS.undated;
             const el = document.createElement('div');
             el.className = `card-enter border rounded-[1.25rem] p-5 transition-all duration-300 hover:scale-[1.01] hover:shadow-md ${colorClass} ${priorityClasses(node)}`;
             el.style.animationDelay = `${index * 0.05}s`;
@@ -186,7 +185,13 @@
             title.className = isProject
                 ? 'text-[15px] font-semibold leading-snug tracking-tight'
                 : 'text-[15px] font-medium leading-snug tracking-tight';
-            title.textContent = node.content;
+            if (node.focused) {
+                const dot = document.createElement('span');
+                dot.className = 'inline-block w-1.5 h-1.5 rounded-full bg-orange-400 mr-2 mb-0.5';
+                dot.title = 'In focus';
+                title.appendChild(dot);
+            }
+            title.appendChild(document.createTextNode(node.content));
             body.appendChild(title);
 
             if (node.target_date) {

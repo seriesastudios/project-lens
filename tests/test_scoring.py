@@ -75,16 +75,19 @@ def test_recently_captured_node_qualifies_briefly():
     assert [entry["id"] for entry in lens] == [1]
 
 
-def test_categories():
+def test_categories_encode_urgency():
     today = datetime.now().date()
-    focused = make_node(1, focus_score=10.0, focused_at=ts(NOW - timedelta(minutes=5)))
+    focused_undated = make_node(1, focus_score=10.0, focused_at=ts(NOW - timedelta(minutes=5)))
     due_today = make_node(2, target_date=today.isoformat())
-    horizon = make_node(3, target_date=(today + timedelta(days=6)).isoformat())
-    lens = scoring.compute_lens([focused, due_today, horizon], [], now=NOW)
-    by_id = {entry["id"]: entry["category"] for entry in lens}
-    assert by_id[1] == scoring.CATEGORY_FOCUS
-    assert by_id[2] == scoring.CATEGORY_NEXT
-    assert by_id[3] == scoring.CATEGORY_HORIZON
+    due_this_week = make_node(3, target_date=(today + timedelta(days=6)).isoformat())
+    lens = scoring.compute_lens([focused_undated, due_today, due_this_week], [], now=NOW)
+    by_id = {entry["id"]: entry for entry in lens}
+    # Focus is a flag, not a wash — the focused-but-undated card stays neutral
+    assert by_id[1]["category"] == scoring.CATEGORY_UNDATED
+    assert by_id[1]["focused"] is True
+    assert by_id[2]["category"] == scoring.CATEGORY_NEXT
+    assert by_id[3]["category"] == scoring.CATEGORY_SOON
+    assert by_id[2]["focused"] is False
 
 
 def test_high_priority_outranks_normal_with_same_deadline():
@@ -102,7 +105,7 @@ def test_high_priority_qualifies_without_deadline():
     plain = make_node(2)
     lens = scoring.compute_lens([important, plain], [], now=NOW)
     assert [e["id"] for e in lens] == [1]
-    assert lens[0]["category"] == scoring.CATEGORY_HORIZON
+    assert lens[0]["category"] == scoring.CATEGORY_UNDATED  # stripe carries importance
 
 
 def test_low_priority_needs_imminent_deadline():
@@ -145,3 +148,18 @@ def test_get_lens_state_annotates_projects_and_focus(monkeypatch):
 
     models.clear_all_focus()
     assert scoring.get_lens_state()["focus"] is None
+
+
+def test_project_card_suppressed_when_its_tasks_are_visible():
+    from app.database import models
+    project = models.add_node("Visible Project", node_type="project",
+                              target_date=datetime.now().date().isoformat())
+    task = models.add_node("Visible task", target_date=datetime.now().date().isoformat())
+    models.add_edge(project, task, "is_part_of")
+    lonely = models.add_node("Lonely Project", node_type="project",
+                             target_date=datetime.now().date().isoformat())
+
+    ids = {c["id"] for c in scoring.get_lens_state()["cards"]}
+    assert task in ids
+    assert project not in ids       # header represents it; card would be noise
+    assert lonely in ids            # sole representation of its project stays

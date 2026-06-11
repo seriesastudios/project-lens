@@ -29,11 +29,12 @@ PRIORITY_BONUS = {"high": 3.0, "normal": 0.0, "low": 0.0}
 PRIORITY_MULTIPLIER = {"high": 1.5, "normal": 1.0, "low": 0.5}
 IMMINENT_DEADLINE_SCORE = 7.0  # deadline part of the scale at ~2 days out
 
-# Categories map 1:1 to the spec's pastel tokens (computed here, not by card index)
-CATEGORY_FOCUS = "focus"        # peach — explicitly hoisted in conversation
-CATEGORY_NEXT = "next"          # butter — overdue/imminent deadline or blocker of a focused item
-CATEGORY_HORIZON = "horizon"    # sage — deadline inside the window
-CATEGORY_ADMIN = "admin"        # lavender — qualified for secondary reasons
+# Card categories encode URGENCY (the wash color answers "when is this due?").
+# Priority is the edge stripe and focus is a dot — three independent channels.
+CATEGORY_NEXT = "next"          # peach — overdue or due within ~2 days
+CATEGORY_SOON = "soon"          # butter — due within the week
+CATEGORY_HORIZON = "horizon"    # sage — dated, but further out
+CATEGORY_UNDATED = "undated"    # neutral — no deadline at all
 
 
 def _parse_db_timestamp(value: Optional[str]) -> Optional[datetime]:
@@ -122,9 +123,8 @@ def compute_lens(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
         entry = dict(node)
         base = focus + deadline + recency + PRIORITY_BONUS.get(priority, 0.0)
         entry["lens_score"] = base * PRIORITY_MULTIPLIER.get(priority, 1.0)
-        entry["_focus"] = focus
+        entry["focused"] = focus >= FOCUS_QUALIFY_THRESHOLD
         entry["_deadline"] = deadline
-        entry["_priority"] = priority
         entry["_qualifies"] = qualifies
         scored[node["id"]] = entry
 
@@ -148,21 +148,21 @@ def compute_lens(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
 
     for entry in lens:
         entry["category"] = _categorize(entry)
-        for key in ("_focus", "_deadline", "_priority", "_qualifies", "_blocker"):
+        for key in ("_deadline", "_qualifies", "_blocker"):
             entry.pop(key, None)
     return lens
 
 
 def _categorize(entry: Dict[str, Any]) -> str:
-    if entry["_focus"] >= FOCUS_QUALIFY_THRESHOLD:
-        return CATEGORY_FOCUS
+    """Urgency only: the wash answers 'when?'. Focus and priority have their
+    own visual channels (dot and stripe)."""
     if entry.get("_blocker") or entry["_deadline"] >= IMMINENT_DEADLINE_SCORE:
         return CATEGORY_NEXT
     if entry["_deadline"] > 0:
-        return CATEGORY_HORIZON
-    if entry.get("_priority") == "high":
-        return CATEGORY_HORIZON  # important-but-undated reads as "coming up", not admin
-    return CATEGORY_ADMIN
+        return CATEGORY_SOON
+    if _parse_deadline(entry.get("target_date")) is not None:
+        return CATEGORY_HORIZON  # dated, but beyond the window
+    return CATEGORY_UNDATED
 
 
 # Hours until a fresh focus (score 10) decays below the qualify threshold
@@ -177,6 +177,16 @@ def get_lens_state() -> Dict[str, Any]:
     nodes = models.get_active_nodes()
     edges = models.get_all_edges()
     cards = compute_lens(nodes, edges)
+
+    # A project card between its own tasks is noise — the group header already
+    # represents it. Keep a project card only when none of its tasks made it.
+    card_ids = {c["id"] for c in cards}
+    children_present = {
+        e["parent_id"] for e in edges
+        if e["relationship"] == "is_part_of" and e["child_id"] in card_ids
+    }
+    cards = [c for c in cards
+             if not (c.get("node_type") == "project" and c["id"] in children_present)]
 
     by_id = {n["id"]: n for n in nodes}
     project_of: Dict[int, Dict[str, Any]] = {}
@@ -205,7 +215,7 @@ def get_lens_state() -> Dict[str, Any]:
     if focused:
         # Label by what's visible: the project(s) of the focused cards that
         # actually made the Lens, not of every node the model boosted.
-        visible_focused = [c for c in cards if c.get("category") == CATEGORY_FOCUS]
+        visible_focused = [c for c in cards if c.get("focused")]
         names = {c["project_name"] for c in visible_focused if c.get("project_name")}
         label = next(iter(names)) if len(names) == 1 else f"{len(focused)} tasks"
 

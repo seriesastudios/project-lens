@@ -219,15 +219,19 @@ def seed_database(reset: bool = False):
                 print(f"  = (exists) {task_text}")
                 continue
 
+            # Tasks do NOT blanket-inherit a hot project's priority — when every
+            # card has a red stripe, none of them do. High comes from This-Week
+            # sections; the project node itself still carries its own priority.
             section = item["section"]
             status = project_status
-            priority = project_priority
+            if section == "high":
+                priority = "high"
+            elif section == "low" or project_priority == "low":
+                priority = "low"
+            else:
+                priority = "normal"
             if section == "waiting":
                 status = "on_hold"
-            elif section == "high":
-                priority = "high"
-            elif section == "low":
-                priority = "low"
 
             task_id = models.add_node(content=task_text, status=status,
                                       target_date=deadline, priority=priority)

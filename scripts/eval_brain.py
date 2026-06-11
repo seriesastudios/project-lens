@@ -43,7 +43,8 @@ async def run_decision_stage(user_text, max_rounds=4):
     leak salvage, and grounding. Returns every successfully EXECUTED call."""
     brain.reset_session()
     messages = [
-        {"role": "system", "content": brain.format_system_prompt(user_text)},
+        {"role": "system", "content": brain.SYSTEM_PROMPT_TEMPLATE},
+        {"role": "system", "content": brain.format_context_prompt(user_text)},
         {"role": "user", "content": user_text},
     ]
     executed = []

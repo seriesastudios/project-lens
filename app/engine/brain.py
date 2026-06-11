@@ -29,7 +29,7 @@ client = AsyncOpenAI(
 )
 
 MAX_TOOL_ROUNDS = 5
-HISTORY_TURNS = 20  # user+assistant messages kept as session memory
+HISTORY_TURNS = 12  # user+assistant messages kept as session memory (tokens are latency)
 
 # Small models occasionally write the tool call as prose ("focus_lens [{...}]")
 # instead of emitting a real one. LM Studio ignores tool_choice="required" and
@@ -123,13 +123,6 @@ SYSTEM_PROMPT_TEMPLATE = """You are Lens-Brain, the action engine of Project Len
 
 The user sees this chat plus "The Lens", a panel of task cards. focus_lens controls what appears there. Tasks are shown in the Lens, never listed in chat.
 
-NOW: {now}
-CALENDAR (use this table for any relative date — do not compute weekdays yourself):
-{calendar}
-ACTIVE TASKS (use these exact IDs in tool calls):
-{task_list}
-FOCUSED NOW: {focus_list}
-
 RULES
 0. Act ONLY on the user's LATEST message. Earlier conversation is context for resolving references — everything in it has already been handled; never re-capture or re-complete from it.
 0b. TRIAGE FIRST: is the latest message NEW work, or about a task in ACTIVE TASKS? New work → capture_tasks immediately (no search_tasks first, no update_task) — even when the message says "critical"/"really important" (that goes in the new task's priority field). Only use update_task/complete_tasks when the task's subject matter actually appears in ACTIVE TASKS. Example: "Really important: I have to send the grant application" with no grant task listed → capture_tasks {{"tasks": [{{"content": "Send the grant application", "priority": "high"}}]}} — NOT update_task on some other task.
@@ -144,6 +137,17 @@ RULES
 
 Reply in plain text ONLY when no rule applies: a single-fact question (one deadline, one status), a greeting, venting, or reflection — answer briefly, capture nothing. For mixed messages, call tools for the actionable part only."""
 
+# Volatile context travels as a SECOND system message so the static prompt above
+# plus the tool schemas form an unchanging prefix that LM Studio's KV cache can
+# reuse across turns (the chat template renders tools after the first system).
+CONTEXT_TEMPLATE = """CURRENT CONTEXT
+NOW: {now}
+CALENDAR (use this table for any relative date — do not compute weekdays yourself):
+{calendar}
+ACTIVE TASKS (use these exact IDs in tool calls):
+{task_list}
+FOCUSED NOW: {focus_list}"""
+
 POST_TOOL_REMINDER = (
     "Tools executed. Now reply to the user in at most two short sentences confirming what "
     "changed, bolding task names with **double asterisks**. NEVER list tasks line by line — "
@@ -153,7 +157,7 @@ POST_TOOL_REMINDER = (
 )
 
 
-def _calendar_table(now: datetime, days: int = 14) -> str:
+def _calendar_table(now: datetime, days: int = 8) -> str:
     """The next two weeks as weekday→date lines; small models fail weekday math."""
     lines = []
     for offset in range(days):
@@ -165,8 +169,10 @@ def _calendar_table(now: datetime, days: int = 14) -> str:
 
 # Below this many active tasks, just show them all; above it, retrieve a
 # relevant subset so the prompt stays small no matter how large the graph grows.
-CONTEXT_FULL_THRESHOLD = 25
-CONTEXT_MAX_TASKS = 30
+# Every context line costs prompt-processing latency (~0.1s per 20 tokens on
+# local hardware), so the cap leans tight.
+CONTEXT_FULL_THRESHOLD = 20
+CONTEXT_MAX_TASKS = 20
 
 
 def select_context_tasks(active_nodes: List[dict], conversation_text: str,
@@ -203,7 +209,7 @@ def select_context_tasks(active_nodes: List[dict], conversation_text: str,
     return (focused + matched + due_soon + recent[-10:])[:CONTEXT_MAX_TASKS]
 
 
-def format_system_prompt(user_text: str = "") -> str:
+def format_context_prompt(user_text: str = "") -> str:
     now = datetime.now()
     active_nodes = models.get_active_nodes()
 
@@ -241,7 +247,7 @@ def format_system_prompt(user_text: str = "") -> str:
     focused = [f"[ID {n['id']}] {n['content']}" for n in active_nodes if (n.get("focus_score") or 0) > 0]
     focus_list = "; ".join(focused) if focused else "nothing"
 
-    return SYSTEM_PROMPT_TEMPLATE.format(
+    return CONTEXT_TEMPLATE.format(
         now=now.strftime("%A, %Y-%m-%d %H:%M"),
         calendar=_calendar_table(now),
         task_list=task_list,
@@ -267,21 +273,23 @@ def normalize_deadline(value: Optional[str], base: Optional[datetime] = None) ->
 
     base = base or datetime.now()
     phrase = text.lower()
-    for prefix in ("by ", "due ", "on ", "before "):
+    for prefix in ("by ", "due ", "on ", "before ", "sometime "):
         if phrase.startswith(prefix):
             phrase = phrase[len(prefix):]
-    phrase = phrase.replace("next ", "").replace("this ", "")
 
-    if "end of month" in phrase or "end of the month" in phrase:
+    if re.search(r"end of (the )?month", phrase) or phrase in ("month", "this month"):
         last_day = _calendar.monthrange(base.year, base.month)[1]
         return base.replace(day=last_day).date().isoformat()
-    if "end of week" in phrase or "end of the week" in phrase:
+    if re.search(r"end of (the )?week", phrase):
         return (base + timedelta(days=(6 - base.weekday()))).date().isoformat()
 
-    parsed = dateparser.parse(phrase, settings={
-        "PREFER_DATES_FROM": "future",
-        "RELATIVE_BASE": base,
-    })
+    settings = {"PREFER_DATES_FROM": "future", "RELATIVE_BASE": base}
+    # dateparser handles "next month"/"in two weeks" natively but not
+    # "next monday"; retry with the qualifier stripped before giving up.
+    parsed = dateparser.parse(phrase, settings=settings)
+    if parsed is None:
+        parsed = dateparser.parse(
+            phrase.replace("next ", "").replace("this ", ""), settings=settings)
     if parsed is None:
         raise ValueError(f"Could not understand deadline {value!r}. Pass YYYY-MM-DD.")
     return parsed.date().isoformat()
@@ -576,7 +584,8 @@ def _execute_link(args: LinkTasksArgs) -> dict:
     if missing:
         return {"error": f"Task IDs {missing} do not exist. Use IDs from the active task list."}
     models.add_edge(args.parent_id, args.child_id, args.relationship)
-    return {"success": True}
+    return {"success": True, "parent_id": args.parent_id, "child_id": args.child_id,
+            "relationship": args.relationship}
 
 
 def _execute_focus(args: FocusLensArgs) -> dict:
@@ -684,18 +693,103 @@ def execute_tool_call(call, enforce_grounding: bool = False) -> str:
 
 
 # ---------------------------------------------------------------------------
+# Templated confirmations — routine outcomes don't need a second LLM call
+# ---------------------------------------------------------------------------
+
+def _node_content(node_id) -> str:
+    node = models.get_node(node_id)
+    return node["content"] if node else f"task {node_id}"
+
+
+_STATUS_PHRASES = {"on_hold": "on hold", "active": "active again", "cold_storage": "archived"}
+
+
+def template_confirmation(executed: List[tuple]) -> Optional[str]:
+    """Builds the user-facing confirmation in code when every executed tool had a
+    clean, routine outcome. Returns None when nuance is needed (errors, unknown
+    IDs, search-only turns) — those fall back to an LLM wrap-up call."""
+    sentences = []
+    for name, result in executed:
+        if "error" in result:
+            return None
+
+        if name == "capture_tasks":
+            created = result.get("created", [])
+            if len(created) == 1:
+                item = created[0]
+                due = f" — due {item['deadline']}" if item.get("deadline") not in (None, "none") else ""
+                sentences.append(f"Captured **{item['content']}**{due}.")
+            elif created:
+                sentences.append(f"Captured {len(created)} tasks — they're in your Lens.")
+            skipped = result.get("skipped_duplicates", [])
+            if skipped:
+                sentences.append(f"({len(skipped)} already existed, not duplicated.)")
+
+        elif name == "complete_tasks":
+            if result.get("unknown_ids"):
+                return None  # the model should sort out what the user meant
+            ids = result.get("completed_ids", [])
+            if len(ids) == 1:
+                sentences.append(f"Checked off **{_node_content(ids[0])}**. ✓")
+            elif ids:
+                sentences.append(f"Checked off {len(ids)} tasks. ✓")
+
+        elif name == "update_task":
+            changed = result.get("changed", {})
+            content = _node_content(result["node_id"])
+            parts = []
+            if "deadline" in changed:
+                parts.append(f"now due {changed['deadline']}")
+            if "status" in changed:
+                parts.append(_STATUS_PHRASES.get(changed["status"], changed["status"]))
+            if "priority" in changed:
+                parts.append(f"{changed['priority']} priority")
+            detail = f" — {', '.join(parts)}" if parts else ""
+            sentences.append(f"Updated **{content}**{detail}.")
+
+        elif name == "link_tasks":
+            parent = _node_content(result["parent_id"])
+            child = _node_content(result["child_id"])
+            if result["relationship"] == "blocks":
+                sentences.append(f"Noted: **{parent}** blocks **{child}**.")
+            elif result["relationship"] == "is_part_of":
+                sentences.append(f"Filed **{child}** under **{parent}**.")
+            else:
+                sentences.append(f"Linked **{parent}** and **{child}**.")
+
+        elif name == "focus_lens":
+            from app.engine import scoring
+            state = scoring.get_lens_state()
+            if state["focus"]:
+                sentences.append(f"Your Lens now shows **{state['focus']['label']}**.")
+            else:
+                sentences.append(f"Focused {len(result.get('focused_ids', []))} tasks — see the Lens.")
+
+        elif name == "clear_focus":
+            sentences.append("Lens cleared.")
+
+        # search_tasks contributes no sentence; an action that followed it speaks
+
+    return " ".join(sentences[:2]) if sentences else None
+
+
+# ---------------------------------------------------------------------------
 # Conversation loop
 # ---------------------------------------------------------------------------
 
 async def process_user_input(user_text: str) -> str:
     """Runs the tool-calling loop and returns the assistant's reply text."""
-    messages: List[Any] = [{"role": "system", "content": format_system_prompt(user_text)}]
+    messages: List[Any] = [
+        {"role": "system", "content": SYSTEM_PROMPT_TEMPLATE},   # static — cacheable prefix
+        {"role": "system", "content": format_context_prompt(user_text)},  # volatile
+    ]
     conversation_history.append({"role": "user", "content": user_text})
     messages += list(conversation_history)
 
     reply = None
     ran_tools = False
     salvage_attempted = False
+    executed: List[tuple] = []  # (tool_name, parsed_result) for templated confirmations
 
     # Stage 1 — decide and act. The decision prompt carries no style rules, so a
     # small model doesn't skip the tool call and jump straight to a styled reply.
@@ -750,17 +844,32 @@ async def process_user_input(user_text: str) -> str:
             messages.append(message)
 
         ran_tools = True
+        round_results = []
         for raw_call in tool_calls:
             tool_call: Any = raw_call
+            result_json = execute_tool_call(tool_call, enforce_grounding=True)
+            round_results.append((tool_call.function.name, json.loads(result_json)))
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "name": tool_call.function.name,
-                "content": execute_tool_call(tool_call, enforce_grounding=True),
+                "content": result_json,
             })
+        executed.extend(round_results)
 
-    # Stage 2 — speak. After tools ran, generate the user-facing confirmation
-    # in a separate call with style rules and no tools on offer.
+        # A clean round of pure actions is finished — don't spend another LLM
+        # call asking the model whether it's done. Searches and errors continue
+        # the loop so the model can act on results or recover.
+        if all(name != "search_tasks" and "error" not in result
+               for name, result in round_results):
+            break
+
+    # Stage 2 — speak. Routine outcomes are confirmed from code (no second
+    # LLM call — this roughly halves actioned-turn latency); anything nuanced
+    # falls back to a wrap-up call with style rules and no tools on offer.
+    if reply is None and ran_tools:
+        reply = template_confirmation(executed)
+
     if reply is None:
         messages.append({"role": "system", "content": POST_TOOL_REMINDER})
         try:

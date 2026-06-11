@@ -231,3 +231,45 @@ def test_capture_and_update_priority():
         "node_id": node_id, "priority": "urgent-ish"
     })))
     assert "error" in result
+
+
+def test_template_confirmation_routine_outcomes():
+    from app.engine.brain import template_confirmation
+    node_id = models.add_node("Order business cards")
+    assert template_confirmation([
+        ("capture_tasks", {"success": True, "created": [
+            {"id": node_id, "content": "Order business cards", "deadline": "2026-06-17"}]})
+    ]) == "Captured **Order business cards** — due 2026-06-17."
+
+    assert template_confirmation([
+        ("complete_tasks", {"success": True, "completed_ids": [node_id]})
+    ]) == "Checked off **Order business cards**. ✓"
+
+    assert template_confirmation([
+        ("update_task", {"success": True, "node_id": node_id,
+                         "changed": {"deadline": "2026-07-01", "priority": "high"}})
+    ]) == "Updated **Order business cards** — now due 2026-07-01, high priority."
+
+    assert template_confirmation([("clear_focus", {"success": True})]) == "Lens cleared."
+
+
+def test_template_confirmation_defers_nuanced_cases():
+    from app.engine.brain import template_confirmation
+    # errors and unknown IDs need the model's judgment
+    assert template_confirmation([("capture_tasks", {"error": "bad args"})]) is None
+    assert template_confirmation([
+        ("complete_tasks", {"success": True, "completed_ids": [1], "unknown_ids": [99]})
+    ]) is None
+    # a search with no follow-up action has nothing to confirm
+    assert template_confirmation([("search_tasks", {"results": [], "hint": "x"})]) is None
+
+
+def test_template_confirmation_link():
+    from app.engine.brain import template_confirmation
+    blocker = models.add_node("Finish mockups")
+    blocked = models.add_node("Build page")
+    text = template_confirmation([
+        ("link_tasks", {"success": True, "parent_id": blocker, "child_id": blocked,
+                        "relationship": "blocks"})
+    ])
+    assert text == "Noted: **Finish mockups** blocks **Build page**."
