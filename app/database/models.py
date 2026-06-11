@@ -256,8 +256,10 @@ _STOPWORDS = {
 
 
 def search_active_nodes(text: str, limit: int = 15) -> List[Dict[str, Any]]:
-    """Full-text search of active nodes against free-form user text.
-    Meaningful words are OR-ed so any overlap surfaces a candidate."""
+    """Full-text search of open (active or on-hold) nodes against free-form
+    user text. Meaningful words are OR-ed so any overlap surfaces a candidate.
+    On-hold items are included so shelved projects stay discoverable — the
+    Lens itself only ever shows active nodes."""
     words = [w for w in re.findall(r"[A-Za-z0-9]{2,}", text or "")
              if w.lower() not in _STOPWORDS]
     if not words:
@@ -267,7 +269,7 @@ def search_active_nodes(text: str, limit: int = 15) -> List[Dict[str, Any]]:
         rows = conn.execute(
             '''SELECT n.* FROM nodes n
                JOIN nodes_fts f ON n.id = f.rowid
-               WHERE nodes_fts MATCH ? AND n.status = 'active'
+               WHERE nodes_fts MATCH ? AND n.status IN ('active', 'on_hold')
                ORDER BY rank LIMIT ?''',
             (query, limit)
         ).fetchall()

@@ -137,10 +137,10 @@ RULES
 2. Deadlines: pass the deadline exactly as the user said it ("Friday", "end of month", "June 3") or as YYYY-MM-DD — the system converts relative dates itself. No date stated or implied → omit the field, never invent one.
 3. The user finished something → call complete_tasks with ALL matching IDs from ACTIVE TASKS, in one call. Match loosely: "sent the invoices" matches "Send invoices to clients". Never create a task for finished work; if nothing matches, ask one short question.
 4. Reword, change deadline, change importance, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change. update_task is for tasks that ALREADY EXIST in ACTIVE TASKS. Importance words about an existing task ("X is critical" → priority high; "X is low priority, no rush" → low). Set priority ONLY when the user signals it — never infer it.
-5. A dependency or grouping is stated → call link_tasks. For "X blocks Y", X is parent_id. Use is_part_of for project/subtask grouping.
+5. A dependency or grouping is stated → call link_tasks. The BLOCKER is always parent_id: "X blocks Y" → X is parent_id; "Y is blocked by X" → X is still parent_id. Use is_part_of for project/subtask grouping.
 6. ANY request to see tasks goes through focus_lens, never a text answer: "focus on X", "what are my tasks", "what should I work on", "what's left / what remains on X", "where am I on X", "show me X". Call focus_lens with ALL matching active IDs (include a project's subtasks). Category words ("errands", "chores", "admin") → judge which ACTIVE TASKS fit yourself and pass those IDs. NEVER list tasks in chat, and never say tasks are in the Lens unless you called focus_lens this turn. Call clear_focus when asked to clear or reset the Lens.
 7. "that", "it", "the second one" → resolve from the recent conversation and ACTIVE TASKS; if genuinely ambiguous, ask one short question — never guess an ID. A correction ("no, I meant Friday") → call update_task on the existing task, never capture a new one.
-8. ACTIVE TASKS is only the slice of the database relevant to this conversation. If the user refers to an EXISTING task or project that is NOT listed, call search_tasks with 2-3 keywords first, then act on the results. Never claim a task doesn't exist without searching. Do NOT search before capturing new work — rule 1 applies directly.
+8. ACTIVE TASKS is only the slice of the database relevant to this conversation. If the user refers to an EXISTING task or project that is NOT listed, call search_tasks with 2-3 keywords first, then act on the results. Never claim a task doesn't exist without searching. Do NOT search before capturing new work — rule 1 applies directly. Search results marked "on_hold" are shelved projects/tasks; when the user wants to resume or activate one, call update_task with status "active".
 
 Reply in plain text ONLY when no rule applies: a single-fact question (one deadline, one status), a greeting, venting, or reflection — answer briefly, capture nothing. For mixed messages, call tools for the actionable part only."""
 
@@ -609,7 +609,8 @@ def _execute_search(args: SearchTasksArgs) -> dict:
     return {
         "results": [
             {"id": n["id"], "content": n["content"],
-             **({"due": n["target_date"]} if n.get("target_date") else {})}
+             **({"due": n["target_date"]} if n.get("target_date") else {}),
+             **({"status": "on_hold"} if n.get("status") == "on_hold" else {})}
             for n in results
         ],
         "hint": "Use these IDs with focus_lens / complete_tasks / update_task / link_tasks."

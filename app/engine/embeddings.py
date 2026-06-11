@@ -88,7 +88,7 @@ def semantic_search(text: str, limit: int = 10, min_similarity: float = 0.52) ->
         rows = conn.execute(
             '''SELECT n.*, e.vector AS _vector FROM nodes n
                JOIN node_embeddings e ON n.id = e.node_id
-               WHERE n.status = 'active' AND e.model = ?''',
+               WHERE n.status IN ('active', 'on_hold') AND e.model = ?''',
             (config.EMBEDDING_MODEL_NAME,)
         ).fetchall()
     if not rows:
