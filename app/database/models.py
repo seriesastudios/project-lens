@@ -7,6 +7,7 @@ from app.config import config
 VALID_STATUSES = ('active', 'completed', 'on_hold', 'cold_storage')
 VALID_RELATIONSHIPS = ('is_part_of', 'blocks', 'depends_on', 'related_to')
 VALID_NODE_TYPES = ('task', 'project')
+VALID_PRIORITIES = ('high', 'normal', 'low')
 
 
 def utc_now_str() -> str:
@@ -41,6 +42,7 @@ _MIGRATION_COLUMNS = [
     ("focused_at", "DATETIME NULL"),
     ("completed_at", "DATETIME NULL"),
     ("updated_at", "DATETIME NULL"),
+    ("priority", "TEXT DEFAULT 'normal'"),
 ]
 
 
@@ -122,12 +124,12 @@ def init_db():
 
 
 def add_node(content: str, status: str = 'active', target_date: Optional[str] = None,
-             node_type: str = 'task') -> int:
+             node_type: str = 'task', priority: str = 'normal') -> int:
     with DatabaseSession() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO nodes (content, status, target_date, node_type) VALUES (?, ?, ?, ?)",
-            (content, status, target_date, node_type)
+            "INSERT INTO nodes (content, status, target_date, node_type, priority) VALUES (?, ?, ?, ?, ?)",
+            (content, status, target_date, node_type, priority)
         )
         assert cursor.lastrowid is not None
         return cursor.lastrowid
@@ -170,12 +172,15 @@ def find_node_by_content(content: str, node_type: Optional[str] = None) -> Optio
 
 
 def update_node(node_id: int, content: Optional[str] = None, status: Optional[str] = None,
-                target_date: Optional[str] = None) -> bool:
+                target_date: Optional[str] = None, priority: Optional[str] = None) -> bool:
     """Partial update; stamps updated_at, and completed_at when completing. Returns False if node missing."""
     fields, params = [], []
     if content is not None:
         fields.append("content = ?")
         params.append(content)
+    if priority is not None:
+        fields.append("priority = ?")
+        params.append(priority)
     if status is not None:
         fields.append("status = ?")
         params.append(status)

@@ -39,12 +39,16 @@ class ConnectionManager:
         if websocket in self.active_connections:
             self.active_connections.remove(websocket)
 
+    @staticmethod
+    def _state_payload() -> str:
+        state = scoring.get_lens_state()
+        return json.dumps({"type": "STATE_UPDATE", "data": state["cards"], "focus": state["focus"]})
+
     async def _send_state(self, websocket: WebSocket):
-        payload = {"type": "STATE_UPDATE", "data": scoring.get_lens_state()}
-        await websocket.send_text(json.dumps(payload))
+        await websocket.send_text(self._state_payload())
 
     async def broadcast_state(self):
-        payload = json.dumps({"type": "STATE_UPDATE", "data": scoring.get_lens_state()})
+        payload = self._state_payload()
         dead = []
         for connection in self.active_connections:
             try:
@@ -86,7 +90,16 @@ async def complete_node(node_id: int):
 
 @app.get("/api/lens")
 async def get_lens():
-    return {"data": scoring.get_lens_state()}
+    state = scoring.get_lens_state()
+    return {"data": state["cards"], "focus": state["focus"]}
+
+
+@app.post("/api/focus/clear")
+async def clear_focus():
+    """Deterministic clear for the focus header's ✕ — no LLM round-trip."""
+    models.clear_all_focus()
+    await manager.broadcast_state()
+    return {"success": True}
 
 
 @app.websocket("/ws")

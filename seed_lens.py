@@ -72,34 +72,49 @@ def humanize(raw_task: str, project: str) -> dict:
         return fallback
 
 
+def map_priority(value) -> str:
+    """Second Brain frontmatter uses numeric priority (1 = top). Map to Lens levels."""
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return "normal"
+    if number <= 1:
+        return "high"
+    if number >= 3:
+        return "low"
+    return "normal"
+
+
 def parse_markdown_tasks(filepath):
     try:
         with open(filepath, 'r', encoding='utf-8') as f:
             content = f.read()
     except Exception as e:
         print(f"Error reading {filepath}: {e}")
-        return None, []
+        return None, [], "normal"
 
     yaml_match = re.match(r"^---\n(.*?)\n---", content, re.DOTALL)
     project_name = None
+    priority = "normal"
     if yaml_match:
         try:
             frontmatter = yaml.safe_load(yaml_match.group(1))
             if frontmatter and isinstance(frontmatter, dict):
                 if str(frontmatter.get('status', '')).lower() != 'active':
-                    return None, []
+                    return None, [], "normal"
                 project_name = frontmatter.get('project') or frontmatter.get('area')
+                priority = map_priority(frontmatter.get('priority'))
         except yaml.YAMLError:
             pass
     if not project_name:
-        return None, []
+        return None, [], "normal"
 
     tasks = []
     for line in content.split("\n"):
         match = re.match(r"^\s*-\s*\[ \]\s*(.+)", line)
         if match:
             tasks.append(match.group(1).strip())
-    return project_name, tasks
+    return project_name, tasks, priority
 
 
 def reset_tasks():
@@ -124,15 +139,16 @@ def seed_database(reset: bool = False):
     total_tasks = 0
 
     for filepath in task_files:
-        project_name, raw_tasks = parse_markdown_tasks(filepath)
+        project_name, raw_tasks, priority = parse_markdown_tasks(filepath)
         if not raw_tasks or not project_name:
             continue
-        print(f"\n{project_name} — {len(raw_tasks)} open tasks")
+        print(f"\n{project_name} — {len(raw_tasks)} open tasks (priority: {priority})")
 
         if project_name not in project_nodes:
             existing = models.find_node_by_content(project_name, node_type="project")
             project_nodes[project_name] = (existing["id"] if existing else
-                models.add_node(content=project_name, status="active", node_type="project"))
+                models.add_node(content=project_name, status="active", node_type="project",
+                                priority=priority))
         proj_id = project_nodes[project_name]
 
         for raw in raw_tasks:
@@ -141,7 +157,8 @@ def seed_database(reset: bool = False):
             if models.find_node_by_content(task_text):
                 print(f"  = (exists) {task_text}")
                 continue
-            task_id = models.add_node(content=task_text, status="active", target_date=deadline)
+            task_id = models.add_node(content=task_text, status="active", target_date=deadline,
+                                      priority=priority)
             models.add_edge(parent_id=proj_id, child_id=task_id, relationship="is_part_of")
             total_tasks += 1
             due = f"  [due {deadline}]" if deadline else ""

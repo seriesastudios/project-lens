@@ -212,3 +212,22 @@ def test_focus_lens_expands_project_to_active_children():
     assert models.get_node(child_a)["focus_score"] == 10.0
     assert models.get_node(done)["focus_score"] == 0.0
     brain.reset_session()
+
+
+def test_capture_and_update_priority():
+    result = json.loads(execute_tool_call(fake_call("capture_tasks", {
+        "tasks": [{"content": "Ship the critical fix", "priority": "high"}]
+    })))
+    node_id = result["created"][0]["id"]
+    assert models.get_node(node_id)["priority"] == "high"
+
+    result = json.loads(execute_tool_call(fake_call("update_task", {
+        "node_id": node_id, "priority": "low"
+    })))
+    assert result["changed"] == {"priority": "low"}
+    assert models.get_node(node_id)["priority"] == "low"
+
+    result = json.loads(execute_tool_call(fake_call("update_task", {
+        "node_id": node_id, "priority": "urgent-ish"
+    })))
+    assert "error" in result

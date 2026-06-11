@@ -52,10 +52,18 @@ async def run_decision_stage(user_text, max_rounds=4):
     ran_tools = False
 
     for _ in range(max_rounds):
-        response = await brain.client.chat.completions.create(
-            model=config.AI_MODEL_NAME, messages=messages,
-            tools=brain.LENS_TOOLS, tool_choice="auto", temperature=0.2,
-        )
+        try:
+            response = await brain.client.chat.completions.create(
+                model=config.AI_MODEL_NAME, messages=messages,
+                tools=brain.LENS_TOOLS, tool_choice="auto", temperature=0.2,
+            )
+        except Exception:
+            # Transient LM Studio hiccup (model loading/swapped) — wait and retry once
+            await asyncio.sleep(10)
+            response = await brain.client.chat.completions.create(
+                model=config.AI_MODEL_NAME, messages=messages,
+                tools=brain.LENS_TOOLS, tool_choice="auto", temperature=0.2,
+            )
         message = response.choices[0].message
         tool_calls = list(message.tool_calls or [])
 
@@ -123,6 +131,10 @@ def build_cases(ids):
          expect_tool("complete_tasks", lambda a: True if ids["invoices"] in a["node_ids"] else f"wrong ids {a['node_ids']}")),
         ("multiple completions", "finished the figma mockups and bought the groceries",
          expect_tool("complete_tasks", lambda a: True if {ids["mockups"], ids["groceries"]} <= set(a["node_ids"]) else f"ids {a['node_ids']}")),
+        ("capture with importance", "Really important: I have to send the grant application, it's critical",
+         expect_tool("capture_tasks", lambda a: True if a["tasks"][0].get("priority") == "high" else f"priority {a['tasks'][0].get('priority')}")),
+        ("deprioritize existing task", "the groceries thing is low priority, no rush on it",
+         expect_tool("update_task", lambda a: True if a["node_id"] == ids["groceries"] and a.get("priority") == "low" else f"args {a}")),
         ("edit deadline", "push the dentist appointment to July 3rd",
          expect_tool("update_task", lambda a: True if a["node_id"] == ids["dentist"] and a.get("deadline") == "2026-07-03" else f"args {a}")),
         ("pause task", "put the landing page on hold for now",

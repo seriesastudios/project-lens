@@ -132,10 +132,11 @@ FOCUSED NOW: {focus_list}
 
 RULES
 0. Act ONLY on the user's LATEST message. Earlier conversation is context for resolving references — everything in it has already been handled; never re-capture or re-complete from it.
-1. The user mentions new work, a goal, or a commitment → call capture_tasks with EVERY distinct task in the message. A project with steps → one item with node_type "project" and the steps in subtasks. Set parent_id when it clearly belongs to an existing item. Never capture anything already in ACTIVE TASKS.
+0b. TRIAGE FIRST: is the latest message NEW work, or about a task in ACTIVE TASKS? New work → capture_tasks immediately (no search_tasks first, no update_task) — even when the message says "critical"/"really important" (that goes in the new task's priority field). Only use update_task/complete_tasks when the task's subject matter actually appears in ACTIVE TASKS. Example: "Really important: I have to send the grant application" with no grant task listed → capture_tasks {{"tasks": [{{"content": "Send the grant application", "priority": "high"}}]}} — NOT update_task on some other task.
+1. The user mentions new work, a goal, or a commitment → call capture_tasks with EVERY distinct task in the message. A project with steps → one item with node_type "project" and the steps in subtasks. Set parent_id when it clearly belongs to an existing item. If they signal importance about the NEW work ("critical", "really important", "must do") set priority "high" on it ("no rush"/"whenever" → "low") — still capture_tasks, never update_task. Never capture anything already in ACTIVE TASKS.
 2. Deadlines: pass the deadline exactly as the user said it ("Friday", "end of month", "June 3") or as YYYY-MM-DD — the system converts relative dates itself. No date stated or implied → omit the field, never invent one.
 3. The user finished something → call complete_tasks with ALL matching IDs from ACTIVE TASKS, in one call. Match loosely: "sent the invoices" matches "Send invoices to clients". Never create a task for finished work; if nothing matches, ask one short question.
-4. Reword, change deadline, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change.
+4. Reword, change deadline, change importance, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change. update_task is for tasks that ALREADY EXIST in ACTIVE TASKS. Importance words about an existing task ("X is critical" → priority high; "X is low priority, no rush" → low). Set priority ONLY when the user signals it — never infer it.
 5. A dependency or grouping is stated → call link_tasks. For "X blocks Y", X is parent_id. Use is_part_of for project/subtask grouping.
 6. ANY request to see tasks goes through focus_lens, never a text answer: "focus on X", "what are my tasks", "what should I work on", "what's left / what remains on X", "where am I on X", "show me X". Call focus_lens with ALL matching active IDs (include a project's subtasks). Category words ("errands", "chores", "admin") → judge which ACTIVE TASKS fit yourself and pass those IDs. NEVER list tasks in chat, and never say tasks are in the Lens unless you called focus_lens this turn. Call clear_focus when asked to clear or reset the Lens.
 7. "that", "it", "the second one" → resolve from the recent conversation and ACTIVE TASKS; if genuinely ambiguous, ask one short question — never guess an ID. A correction ("no, I meant Friday") → call update_task on the existing task, never capture a new one.
@@ -225,6 +226,8 @@ def format_system_prompt(user_text: str = "") -> str:
                 parts.append("(project)")
             if node.get("target_date"):
                 parts.append(f"(due {node['target_date']})")
+            if node.get("priority") in ("high", "low"):
+                parts.append(f"({node['priority']} priority)")
             lines.append(" ".join(parts))
         task_list = "\n".join(lines)
         if len(context_nodes) < len(active_nodes):
@@ -290,7 +293,15 @@ class TaskItem(BaseModel):
     parent_id: Optional[int] = None
     relationship: str = "is_part_of"
     node_type: str = "task"
+    priority: str = "normal"
     subtasks: List[str] = Field(default_factory=list)
+
+    @field_validator("priority")
+    @classmethod
+    def check_priority(cls, value):
+        if value not in models.VALID_PRIORITIES:
+            raise ValueError(f"priority must be one of {models.VALID_PRIORITIES}")
+        return value
 
     @field_validator("deadline")
     @classmethod
@@ -325,6 +336,14 @@ class UpdateTaskArgs(BaseModel):
     content: Optional[str] = None
     deadline: Optional[str] = None
     status: Optional[str] = None
+    priority: Optional[str] = None
+
+    @field_validator("priority")
+    @classmethod
+    def check_priority(cls, value):
+        if value is not None and value not in models.VALID_PRIORITIES:
+            raise ValueError(f"priority must be one of {models.VALID_PRIORITIES}")
+        return value
 
     @field_validator("deadline")
     @classmethod
@@ -379,6 +398,7 @@ LENS_TOOLS: Any = [
                                 "parent_id": {"type": "integer", "description": "ID of an EXISTING active task/project this belongs to."},
                                 "relationship": {"type": "string", "enum": ["is_part_of", "blocks", "depends_on", "related_to"], "description": "How this attaches to parent_id. Default is_part_of."},
                                 "node_type": {"type": "string", "enum": ["task", "project"], "description": "Use 'project' for umbrella goals with steps."},
+                                "priority": {"type": "string", "enum": ["high", "normal", "low"], "description": "Only when the user signals it: 'critical'/'really important'/'must do' = high; 'low priority'/'whenever'/'no rush' = low. Omit otherwise."},
                                 "subtasks": {"type": "array", "items": {"type": "string"}, "description": "Step descriptions to create as children of this item."}
                             },
                             "required": ["content"]
@@ -414,7 +434,8 @@ LENS_TOOLS: Any = [
                     "node_id": {"type": "integer", "description": "ID of the task to edit."},
                     "content": {"type": "string", "description": "New wording, if rewording."},
                     "deadline": {"type": "string", "description": "New deadline, as the user said it ('next Monday') or YYYY-MM-DD."},
-                    "status": {"type": "string", "enum": ["active", "on_hold", "cold_storage"], "description": "New status (use complete_tasks for completion)."}
+                    "status": {"type": "string", "enum": ["active", "on_hold", "cold_storage"], "description": "New status (use complete_tasks for completion)."},
+                    "priority": {"type": "string", "enum": ["high", "normal", "low"], "description": "New importance level, when the user raises or lowers it."}
                 },
                 "required": ["node_id"]
             }
@@ -499,9 +520,11 @@ def _execute_capture(args: CaptureTasksArgs) -> dict:
                             "note": "already existed, not duplicated"})
             node_id = existing["id"]
         else:
-            node_id = models.add_node(content=item.content, target_date=item.deadline, node_type=item.node_type)
+            node_id = models.add_node(content=item.content, target_date=item.deadline,
+                                      node_type=item.node_type, priority=item.priority)
             created.append({"id": node_id, "content": item.content,
-                            "deadline": item.deadline or "none"})
+                            "deadline": item.deadline or "none",
+                            "priority": item.priority})
             embeddings.index_node(node_id, item.content)
         seen_node_ids.add(node_id)
         if item.parent_id is not None:
@@ -538,11 +561,13 @@ def _execute_complete(args: CompleteTasksArgs) -> dict:
 def _execute_update(args: UpdateTaskArgs) -> dict:
     if not models.existing_node_ids([args.node_id]):
         return {"error": f"Task {args.node_id} does not exist. Use an ID from the active task list."}
-    models.update_node(args.node_id, content=args.content, status=args.status, target_date=args.deadline)
+    models.update_node(args.node_id, content=args.content, status=args.status,
+                       target_date=args.deadline, priority=args.priority)
     if args.content is not None:
         embeddings.index_node(args.node_id, args.content)
     changed = {k: v for k, v in (("content", args.content), ("status", args.status),
-                                 ("deadline", args.deadline)) if v is not None}
+                                 ("deadline", args.deadline), ("priority", args.priority))
+               if v is not None}
     return {"success": True, "node_id": args.node_id, "changed": changed}
 
 

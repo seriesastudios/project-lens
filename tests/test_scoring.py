@@ -85,3 +85,63 @@ def test_categories():
     assert by_id[1] == scoring.CATEGORY_FOCUS
     assert by_id[2] == scoring.CATEGORY_NEXT
     assert by_id[3] == scoring.CATEGORY_HORIZON
+
+
+def test_high_priority_outranks_normal_with_same_deadline():
+    today = datetime.now().date()
+    normal = make_node(1, target_date=today.isoformat())
+    important = make_node(2, target_date=today.isoformat())
+    important["priority"] = "high"
+    lens = scoring.compute_lens([normal, important], [], now=NOW)
+    assert [e["id"] for e in lens] == [2, 1]
+
+
+def test_high_priority_qualifies_without_deadline():
+    important = make_node(1)
+    important["priority"] = "high"
+    plain = make_node(2)
+    lens = scoring.compute_lens([important, plain], [], now=NOW)
+    assert [e["id"] for e in lens] == [1]
+    assert lens[0]["category"] == scoring.CATEGORY_HORIZON
+
+
+def test_low_priority_needs_imminent_deadline():
+    today = datetime.now().date()
+    low_far = make_node(1, target_date=(today + timedelta(days=5)).isoformat())
+    low_far["priority"] = "low"
+    low_now = make_node(2, target_date=today.isoformat())
+    low_now["priority"] = "low"
+    lens = scoring.compute_lens([low_far, low_now], [], now=NOW)
+    assert [e["id"] for e in lens] == [2]
+
+
+def test_high_priority_ranks_below_due_today_normal():
+    today = datetime.now().date()
+    due_today = make_node(1, target_date=today.isoformat())
+    important_undated = make_node(2)
+    important_undated["priority"] = "high"
+    lens = scoring.compute_lens([due_today, important_undated], [], now=NOW)
+    assert [e["id"] for e in lens] == [1, 2]
+
+
+def test_get_lens_state_annotates_projects_and_focus(monkeypatch):
+    from app.database import models
+    project = models.add_node("The Cage", node_type="project")
+    task_a = models.add_node("Submit FIN Atlantic", target_date=datetime.now().date().isoformat())
+    task_b = models.add_node("Review composer contract", target_date=datetime.now().date().isoformat())
+    models.add_edge(project, task_a, "is_part_of")
+    models.add_edge(project, task_b, "is_part_of")
+    models.set_focus([task_a, task_b])
+
+    state = scoring.get_lens_state()
+    cards = {c["id"]: c for c in state["cards"]}
+    assert cards[task_a]["project_name"] == "The Cage"
+    assert cards[task_a]["project_open_total"] == 2
+
+    focus = state["focus"]
+    assert focus["label"] == "The Cage"
+    assert focus["count"] == 2
+    assert focus["hours_left"] is not None and focus["hours_left"] > 0
+
+    models.clear_all_focus()
+    assert scoring.get_lens_state()["focus"] is None
