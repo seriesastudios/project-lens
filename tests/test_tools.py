@@ -195,3 +195,20 @@ def test_grounding_rejects_unseen_ids_and_allows_seen():
         fake_call("focus_lens", {"node_ids": [real]}), enforce_grounding=True))
     assert result["success"]
     brain.reset_session()
+
+
+def test_focus_lens_expands_project_to_active_children():
+    from app.engine import brain
+    project = models.add_node("Website redesign", node_type="project")
+    child_a = models.add_node("Finish mockups for site")
+    child_b = models.add_node("Write copy for site")
+    done = models.add_node("Old completed step")
+    for child in (child_a, child_b, done):
+        models.add_edge(project, child, "is_part_of")
+    models.complete_nodes([done])
+
+    result = json.loads(execute_tool_call(fake_call("focus_lens", {"node_ids": [project]})))
+    assert set(result["focused_ids"]) == {project, child_a, child_b}
+    assert models.get_node(child_a)["focus_score"] == 10.0
+    assert models.get_node(done)["focus_score"] == 0.0
+    brain.reset_session()

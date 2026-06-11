@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.engine import scoring
+from app.engine import embeddings, scoring
 from app.engine.brain import process_user_input
 from app.database import models
 
@@ -14,6 +14,10 @@ from app.database import models
 @asynccontextmanager
 async def lifespan(_app: FastAPI):
     models.init_db()
+    # Index any nodes that don't have embeddings yet (no-op if server is down)
+    indexed = embeddings.backfill()
+    if indexed:
+        print(f"Embeddings: indexed {indexed} nodes at startup")
     yield
 
 

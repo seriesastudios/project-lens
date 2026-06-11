@@ -21,6 +21,7 @@ from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from app.config import config
 from app.database import models
+from app.engine import embeddings
 
 client = AsyncOpenAI(
     base_url=config.AI_BASE_URL,
@@ -136,7 +137,7 @@ RULES
 3. The user finished something → call complete_tasks with ALL matching IDs from ACTIVE TASKS, in one call. Match loosely: "sent the invoices" matches "Send invoices to clients". Never create a task for finished work; if nothing matches, ask one short question.
 4. Reword, change deadline, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change.
 5. A dependency or grouping is stated → call link_tasks. For "X blocks Y", X is parent_id. Use is_part_of for project/subtask grouping.
-6. The user asks to focus on something, asks what their tasks are, or asks what to work on → call focus_lens with ALL matching active IDs (include a project's subtasks). Category words ("errands", "chores", "admin", "work stuff") → judge which ACTIVE TASKS fit the category yourself and pass those IDs. NEVER list tasks in chat — the Lens shows them. Call clear_focus when asked to clear or reset the Lens.
+6. ANY request to see tasks goes through focus_lens, never a text answer: "focus on X", "what are my tasks", "what should I work on", "what's left / what remains on X", "where am I on X", "show me X". Call focus_lens with ALL matching active IDs (include a project's subtasks). Category words ("errands", "chores", "admin") → judge which ACTIVE TASKS fit yourself and pass those IDs. NEVER list tasks in chat, and never say tasks are in the Lens unless you called focus_lens this turn. Call clear_focus when asked to clear or reset the Lens.
 7. "that", "it", "the second one" → resolve from the recent conversation and ACTIVE TASKS; if genuinely ambiguous, ask one short question — never guess an ID. A correction ("no, I meant Friday") → call update_task on the existing task, never capture a new one.
 8. ACTIVE TASKS is only the slice of the database relevant to this conversation. If the user refers to an EXISTING task or project that is NOT listed, call search_tasks with 2-3 keywords first, then act on the results. Never claim a task doesn't exist without searching. Do NOT search before capturing new work — rule 1 applies directly.
 
@@ -181,8 +182,9 @@ def select_context_tasks(active_nodes: List[dict], conversation_text: str,
 
     # Priority buckets: when the cap bites, conversation matches and focused
     # tasks survive; "recently captured" noise is the first to drop.
+    from app.engine import retrieval
     focused, matched, due_soon, recent = [], [], [], []
-    matched_ids = {n["id"] for n in models.search_active_nodes(conversation_text, limit=15)}
+    matched_ids = {n["id"] for n in retrieval.search_active(conversation_text, limit=15)}
 
     for node in active_nodes:
         deadline = scoring._parse_deadline(node.get("target_date"))
@@ -500,6 +502,7 @@ def _execute_capture(args: CaptureTasksArgs) -> dict:
             node_id = models.add_node(content=item.content, target_date=item.deadline, node_type=item.node_type)
             created.append({"id": node_id, "content": item.content,
                             "deadline": item.deadline or "none"})
+            embeddings.index_node(node_id, item.content)
         seen_node_ids.add(node_id)
         if item.parent_id is not None:
             models.add_edge(parent_id=item.parent_id, child_id=node_id, relationship=item.relationship)
@@ -513,6 +516,7 @@ def _execute_capture(args: CaptureTasksArgs) -> dict:
             child_id = models.add_node(content=subtask, node_type="task")
             models.add_edge(parent_id=node_id, child_id=child_id, relationship="is_part_of")
             created.append({"id": child_id, "content": subtask})
+            embeddings.index_node(child_id, subtask)
             seen_node_ids.add(child_id)
 
     result = {"success": True, "created": created}
@@ -535,6 +539,8 @@ def _execute_update(args: UpdateTaskArgs) -> dict:
     if not models.existing_node_ids([args.node_id]):
         return {"error": f"Task {args.node_id} does not exist. Use an ID from the active task list."}
     models.update_node(args.node_id, content=args.content, status=args.status, target_date=args.deadline)
+    if args.content is not None:
+        embeddings.index_node(args.node_id, args.content)
     changed = {k: v for k, v in (("content", args.content), ("status", args.status),
                                  ("deadline", args.deadline)) if v is not None}
     return {"success": True, "node_id": args.node_id, "changed": changed}
@@ -549,7 +555,16 @@ def _execute_link(args: LinkTasksArgs) -> dict:
 
 
 def _execute_focus(args: FocusLensArgs) -> dict:
-    focused = models.set_focus(args.node_ids)
+    # Focusing a project means focusing its open tasks — expand deterministically
+    # rather than relying on the model to enumerate subtask IDs.
+    expanded = list(args.node_ids)
+    for node_id in args.node_ids:
+        node = models.get_node(node_id)
+        if node and node.get("node_type") == "project":
+            expanded.extend(i for i in models.get_active_child_ids(node_id) if i not in expanded)
+    seen_node_ids.update(expanded)
+
+    focused = models.set_focus(expanded)
     missing = [node_id for node_id in args.node_ids if node_id not in focused]
     result = {"success": bool(focused), "focused_ids": focused}
     if missing:
@@ -563,7 +578,8 @@ def _execute_clear_focus() -> dict:
 
 
 def _execute_search(args: SearchTasksArgs) -> dict:
-    results = models.search_active_nodes(args.query, limit=15)
+    from app.engine import retrieval
+    results = retrieval.search_active(args.query, limit=15)
     seen_node_ids.update(n["id"] for n in results)
     return {
         "results": [

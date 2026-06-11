@@ -6,4 +6,5 @@ pyyaml
 websockets
 pydantic
 dateparser
+numpy
 pytest

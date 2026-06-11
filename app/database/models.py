@@ -110,6 +110,16 @@ def init_db():
         # Sync rows that predate the index (cheap at this scale)
         cursor.execute("INSERT INTO nodes_fts(nodes_fts) VALUES ('rebuild')")
 
+        # Semantic vectors live alongside the relational data — SQLite stays the
+        # single source of truth; no separate vector database needed at this scale.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS node_embeddings (
+                node_id INTEGER PRIMARY KEY REFERENCES nodes(id) ON DELETE CASCADE,
+                model TEXT NOT NULL,
+                vector BLOB NOT NULL
+            )
+        ''')
+
 
 def add_node(content: str, status: str = 'active', target_date: Optional[str] = None,
              node_type: str = 'task') -> int:
@@ -262,6 +272,18 @@ def search_active_nodes(text: str, limit: int = 15) -> List[Dict[str, Any]]:
 def get_all_edges() -> List[Dict[str, Any]]:
     with DatabaseSession() as conn:
         return [dict(row) for row in conn.execute("SELECT * FROM edges").fetchall()]
+
+
+def get_active_child_ids(parent_id: int, relationship: str = "is_part_of") -> List[int]:
+    """Active children of a node (e.g. a project's open tasks)."""
+    with DatabaseSession() as conn:
+        rows = conn.execute(
+            '''SELECT n.id FROM nodes n
+               JOIN edges e ON n.id = e.child_id
+               WHERE e.parent_id = ? AND e.relationship = ? AND n.status = 'active' ''',
+            (parent_id, relationship)
+        ).fetchall()
+        return [row["id"] for row in rows]
 
 
 def get_edges_for_node(node_id: int) -> List[Dict[str, Any]]:

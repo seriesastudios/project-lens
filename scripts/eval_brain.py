@@ -135,6 +135,8 @@ def build_cases(ids):
          expect_tool("focus_lens")),
         ("list query goes to lens", "what are my errands?",
          expect_tool("focus_lens")),
+        ("what's-left query goes to lens", "what's left to do on the website redesign?",
+         expect_tool("focus_lens", lambda a: True if {ids["website"], ids["mockups"], ids["landing"]} & set(a["node_ids"]) else f"ids {a['node_ids']}")),
         ("clear lens", "clear the lens please",
          expect_tool("clear_focus")),
         ("single fact in chat", "when is the dentist appointment due?",
