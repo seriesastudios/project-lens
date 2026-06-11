@@ -62,19 +62,26 @@ def seed_database():
     for filepath in task_files:
         project_name, tasks = parse_markdown_tasks(filepath)
         
-        if not tasks:
+        if not tasks or not project_name:
             continue
             
         print(f"Processing '{project_name}': found {len(tasks)} tasks.")
         
-        # Get or create project node
+        # Get or create project node (idempotent: re-running the seeder must not duplicate)
         if project_name not in project_nodes:
-            proj_id = models.add_node(content=f"Project: {project_name}", status="active")
-            project_nodes[project_name] = proj_id
-        
+            existing = models.find_node_by_content(project_name, node_type="project")
+            if existing:
+                project_nodes[project_name] = existing["id"]
+            else:
+                project_nodes[project_name] = models.add_node(
+                    content=project_name, status="active", node_type="project"
+                )
+
         proj_id = project_nodes[project_name]
-        
+
         for task in tasks:
+            if models.find_node_by_content(task):
+                continue
             task_id = models.add_node(content=task, status="active")
             models.add_edge(parent_id=proj_id, child_id=task_id, relationship="is_part_of")
             total_tasks += 1

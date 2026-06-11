@@ -10,7 +10,7 @@
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap" rel="stylesheet">
-    
+
     <script>
         tailwind.config = {
             theme: {
@@ -27,11 +27,11 @@
             font-family: 'Inter', sans-serif;
             background-color: #FAFAFA;
         }
-        
+
         .card-enter {
             animation: slideIn 0.3s ease-out forwards;
         }
-        
+
         @keyframes slideIn {
             from {
                 opacity: 0;
@@ -57,7 +57,7 @@
 
     <!-- 60% Left Pane: The Journal / Active Chat -->
     <div class="w-[60%] h-full flex flex-col border-r border-gray-200/60 bg-white shadow-[10px_0_15px_-3px_rgba(0,0,0,0.02)] relative z-10">
-        
+
         <!-- Header -->
         <div class="px-10 py-8 pb-4">
             <h1 class="text-2xl font-semibold tracking-tight text-gray-900">The Journal</h1>
@@ -70,7 +70,7 @@
             <div class="flex flex-col items-start gap-1">
                 <span class="text-xs font-semibold text-gray-400 uppercase tracking-widest mb-1 ml-1">Lens Brain</span>
                 <div class="px-5 py-3.5 bg-gray-50 border border-gray-100 text-gray-700 text-[15px] leading-relaxed rounded-2xl rounded-tl-sm max-w-[85%] shadow-sm">
-                    System initialized. I'm ready to capture your intent and update the graph.
+                    Ready when you are. Tell me what's on your mind.
                 </div>
             </div>
         </div>
@@ -78,11 +78,11 @@
         <!-- Input Area -->
         <div class="absolute bottom-0 w-full p-6 bg-gradient-to-t from-white via-white to-transparent pt-12">
             <form id="chat-form" class="relative group max-w-3xl mx-auto shadow-sm">
-                <input 
-                    type="text" 
+                <input
+                    type="text"
                     id="chat-input"
-                    class="w-full bg-white border border-gray-200 text-gray-800 text-[15px] rounded-2xl focus:ring-4 focus:ring-orange-50 focus:border-orange-200 block p-4 pl-5 pr-14 outline-none transition-all duration-200 placeholder-gray-400 font-medium" 
-                    placeholder="Capture a thought, task, or goal..." 
+                    class="w-full bg-white border border-gray-200 text-gray-800 text-[15px] rounded-2xl focus:ring-4 focus:ring-orange-50 focus:border-orange-200 block p-4 pl-5 pr-14 outline-none transition-all duration-200 placeholder-gray-400 font-medium"
+                    placeholder="Capture a thought, task, or goal..."
                     autocomplete="off"
                     required>
                 <button type="submit" id="send-btn" class="absolute inset-y-0 right-2 flex items-center justify-center my-auto h-10 w-10 text-gray-400 hover:text-orange-500 hover:bg-orange-50 rounded-xl transition-all duration-200">
@@ -94,12 +94,12 @@
 
     <!-- 40% Right Pane: The Lens / Focus Stack -->
     <div class="w-[40%] h-full bg-[#FAFAFA] flex flex-col relative z-0">
-        
+
         <!-- Header -->
         <div class="px-10 py-8 pb-4 flex justify-between items-end">
             <div>
                 <h2 class="text-2xl font-semibold tracking-tight text-gray-900">The Lens</h2>
-                <p class="text-sm text-gray-400 mt-1 font-medium">Focus stack (max 7)</p>
+                <p class="text-sm text-gray-400 mt-1 font-medium">What matters right now</p>
             </div>
             <div class="flex items-center gap-2 text-xs font-semibold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-100">
                 <span class="relative flex h-2 w-2">
@@ -114,7 +114,7 @@
         <div class="flex-1 px-8 py-6 pt-2 overflow-y-auto no-scrollbar">
             <div id="node-container" class="space-y-3.5 flex flex-col">
                 <!-- Cards injected here via WebSocket -->
-                <div class="text-center py-20 text-gray-400 text-sm italic">Waiting for state hydration...</div>
+                <div class="text-center py-20 text-gray-400 text-sm italic">Connecting…</div>
             </div>
         </div>
     </div>
@@ -127,84 +127,116 @@
         const nodeContainer = document.getElementById('node-container');
         const sendBtn = document.getElementById('send-btn');
 
-        // Color Mapping based on index/priority
-        const getColorTokens = (index) => {
-            if (index === 0) {
-                // Immediate Core Focus
-                return 'bg-orange-50 text-orange-950 border-orange-200/60 shadow-[0_4px_20px_-4px_rgba(255,237,213,0.5)]';
-            } else if (index === 1 || index === 2) {
-                // Up Next Sequential
-                return 'bg-amber-50/70 text-amber-950 border-amber-200/40 shadow-sm';
-            } else if (index >= 3 && index <= 4) {
-                // On Horizon Baseline
-                return 'bg-emerald-50/60 text-emerald-950 border-emerald-200/30';
-            } else {
-                // Administrative Low Energy
-                return 'bg-indigo-50/50 text-indigo-950 border-indigo-200/30 opacity-90';
-            }
+        // Pastel tokens keyed by the category the backend computed for each card
+        // (focus = conversation spotlight, next = imminent/blocker, horizon = upcoming
+        // deadline, admin = everything else that qualified).
+        const CATEGORY_TOKENS = {
+            focus:   'bg-orange-50 text-orange-950 border-orange-200/60 shadow-[0_4px_20px_-4px_rgba(255,237,213,0.5)]',
+            next:    'bg-amber-50/70 text-amber-950 border-amber-200/40 shadow-sm',
+            horizon: 'bg-emerald-50/60 text-emerald-950 border-emerald-200/30',
+            admin:   'bg-indigo-50/50 text-indigo-950 border-indigo-200/30 opacity-90',
         };
 
-        // Render Cards
+        const formatDeadline = (value) => {
+            const date = new Date(value);
+            if (isNaN(date)) return value;
+            return date.toLocaleDateString(undefined, { weekday: 'short', month: 'short', day: 'numeric' });
+        };
+
+        // Render Cards (all text injected via textContent — never raw HTML)
         const renderNodes = (nodes) => {
             nodeContainer.innerHTML = '';
-            
+
             if (!nodes || nodes.length === 0) {
-                nodeContainer.innerHTML = '<div class="text-center py-20 text-gray-400 text-sm italic font-medium">The Lens is completely clear.</div>';
+                const empty = document.createElement('div');
+                empty.className = 'text-center py-20 text-gray-400 text-sm italic font-medium';
+                empty.textContent = 'The Lens is clear.';
+                nodeContainer.appendChild(empty);
                 return;
             }
 
             nodes.forEach((node, index) => {
-                const colorClass = getColorTokens(index);
+                const colorClass = CATEGORY_TOKENS[node.category] || CATEGORY_TOKENS.admin;
                 const el = document.createElement('div');
                 el.className = `card-enter border rounded-[1.25rem] p-5 transition-all duration-300 hover:scale-[1.01] hover:shadow-md ${colorClass}`;
                 el.style.animationDelay = `${index * 0.05}s`;
-                
-                el.innerHTML = `
-                    <div class="flex items-start justify-between gap-4">
-                        <div class="flex-1">
-                            <p class="text-[15px] font-medium leading-snug tracking-tight">${node.content}</p>
-                            ${node.target_date ? `<p class="text-xs opacity-70 mt-2 font-medium flex items-center gap-1"><svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>${node.target_date}</p>` : ''}
-                        </div>
-                        <div class="flex-shrink-0">
-                            <button class="h-6 w-6 rounded-full border border-current opacity-30 hover:opacity-100 hover:bg-black/5 transition-all flex items-center justify-center" onclick="completeNode(${node.id})">
-                                <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>
-                            </button>
-                        </div>
-                    </div>
-                `;
+
+                const row = document.createElement('div');
+                row.className = 'flex items-start justify-between gap-4';
+
+                const body = document.createElement('div');
+                body.className = 'flex-1';
+
+                const title = document.createElement('p');
+                title.className = 'text-[15px] font-medium leading-snug tracking-tight';
+                title.textContent = node.content;
+                body.appendChild(title);
+
+                if (node.target_date) {
+                    const due = document.createElement('p');
+                    due.className = 'text-xs opacity-70 mt-2 font-medium flex items-center gap-1';
+                    due.innerHTML = '<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"></path></svg>';
+                    due.appendChild(document.createTextNode(formatDeadline(node.target_date)));
+                    body.appendChild(due);
+                }
+
+                const actions = document.createElement('div');
+                actions.className = 'flex-shrink-0';
+                const doneBtn = document.createElement('button');
+                doneBtn.className = 'h-6 w-6 rounded-full border border-current opacity-30 hover:opacity-100 hover:bg-black/5 transition-all flex items-center justify-center';
+                doneBtn.title = 'Mark complete';
+                doneBtn.innerHTML = '<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>';
+                doneBtn.addEventListener('click', () => completeNode(node.id));
+                actions.appendChild(doneBtn);
+
+                row.appendChild(body);
+                row.appendChild(actions);
+                el.appendChild(row);
                 nodeContainer.appendChild(el);
             });
         };
 
-        // Complete Node helper (fires a chat implicitly)
-        window.completeNode = (id) => {
-            sendChatMessage(`I have completed task ID ${id}. Please mark it as completed.`);
+        // Direct, deterministic completion — no LLM round-trip for a button click.
+        // The server broadcasts the new lens state over the WebSocket.
+        const completeNode = async (id) => {
+            try {
+                const response = await fetch(`/api/nodes/${id}/complete`, { method: 'POST' });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+            } catch (err) {
+                appendMessage('**Error:** could not complete the task. Is the backend running?', false);
+                console.error(err);
+            }
         };
 
-        // Append message to chat
+        const escapeHtml = (text) => {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        };
+
+        // Append message to chat (escape first, then apply **bold** only)
         const appendMessage = (text, isUser = false) => {
             const wrapper = document.createElement('div');
             wrapper.className = `flex flex-col ${isUser ? 'items-end' : 'items-start'} gap-1 card-enter`;
-            
+
             const sender = document.createElement('span');
             sender.className = `text-xs font-semibold uppercase tracking-widest mb-1 ${isUser ? 'mr-2 text-orange-400' : 'ml-2 text-gray-400'}`;
             sender.innerText = isUser ? 'You' : 'Lens Brain';
-            
+
             const bubble = document.createElement('div');
-            // Parse markdown bold **text** to <strong>text</strong>
-            const parsedText = text.replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold">$1</strong>');
-            
+            const parsedText = escapeHtml(text).replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold">$1</strong>');
+
             if (isUser) {
                 bubble.className = 'px-5 py-3.5 bg-gray-900 text-white text-[15px] leading-relaxed rounded-2xl rounded-tr-sm max-w-[85%] shadow-md font-medium';
             } else {
                 bubble.className = 'px-5 py-3.5 bg-gray-50 border border-gray-100 text-gray-700 text-[15px] leading-relaxed rounded-2xl rounded-tl-sm max-w-[85%] shadow-sm';
             }
             bubble.innerHTML = parsedText;
-            
+
             wrapper.appendChild(sender);
             wrapper.appendChild(bubble);
             chatHistory.appendChild(wrapper);
-            
+
             // Scroll to bottom
             chatHistory.scrollTop = chatHistory.scrollHeight;
         };
@@ -212,17 +244,17 @@
         // Send Chat Message via REST API
         const sendChatMessage = async (message) => {
             appendMessage(message, true);
-            
+
             chatInput.disabled = true;
             sendBtn.innerHTML = `<svg class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>`;
-            
+
             try {
                 const response = await fetch('/api/chat', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message })
                 });
-                
+
                 const data = await response.json();
                 appendMessage(data.reply, false);
             } catch (err) {
@@ -240,7 +272,7 @@
             e.preventDefault();
             const message = chatInput.value.trim();
             if (!message) return;
-            
+
             chatInput.value = '';
             sendChatMessage(message);
         });
@@ -249,9 +281,9 @@
         let ws;
         const connectWebSocket = () => {
             ws = new WebSocket('ws://' + window.location.host + '/ws');
-            
+
             ws.onopen = () => console.log('WS Connected');
-            
+
             ws.onmessage = (event) => {
                 try {
                     const payload = JSON.parse(event.data);

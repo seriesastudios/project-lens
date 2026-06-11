@@ -1,26 +1,27 @@
 import json
-import asyncio
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from contextlib import asynccontextmanager
 from typing import List
 
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi.responses import FileResponse
+from pydantic import BaseModel
+
+from app.engine import scoring
 from app.engine.brain import process_user_input
-from app.database.models import get_active_nodes, get_edges_for_node
+from app.database import models
 
-app = FastAPI(title="Project Lens Runtime", description="Local Task Graph Management System")
 
-# Set up CORS for frontend decoupling
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],  # Open for local HTML files
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+@asynccontextmanager
+async def lifespan(_app: FastAPI):
+    models.init_db()
+    yield
 
-# WebSocket Connection Manager
+
+app = FastAPI(title="Project Lens Runtime",
+              description="Local Task Graph Management System",
+              lifespan=lifespan)
+
+
 class ConnectionManager:
     def __init__(self):
         self.active_connections: List[WebSocket] = []
@@ -28,56 +29,78 @@ class ConnectionManager:
     async def connect(self, websocket: WebSocket):
         await websocket.accept()
         self.active_connections.append(websocket)
-        # Send initial state upon connection
-        await self.broadcast_state()
+        await self._send_state(websocket)
 
     def disconnect(self, websocket: WebSocket):
-        self.active_connections.remove(websocket)
+        if websocket in self.active_connections:
+            self.active_connections.remove(websocket)
+
+    async def _send_state(self, websocket: WebSocket):
+        payload = {"type": "STATE_UPDATE", "data": scoring.get_lens_state()}
+        await websocket.send_text(json.dumps(payload))
 
     async def broadcast_state(self):
-        nodes = get_active_nodes()
-        payload = {"type": "STATE_UPDATE", "data": nodes}
+        payload = json.dumps({"type": "STATE_UPDATE", "data": scoring.get_lens_state()})
+        dead = []
         for connection in self.active_connections:
             try:
-                await connection.send_text(json.dumps(payload))
+                await connection.send_text(payload)
             except Exception:
-                pass
+                dead.append(connection)
+        for connection in dead:
+            self.disconnect(connection)
+
 
 manager = ConnectionManager()
+
 
 class ChatRequest(BaseModel):
     message: str
 
+
 class ChatResponse(BaseModel):
     reply: str
 
+
 @app.post("/api/chat", response_model=ChatResponse)
 async def chat_endpoint(request: ChatRequest):
-    """Takes user text, processes it through the SLM, and returns the response."""
-    # Process through the brain (this blocks, but for a local engine it's usually acceptable; 
-    # could be run in a thread pool for true async)
-    reply_text = process_user_input(request.message)
-    
-    # Broadcast the new state to all connected frontends
+    """Routes user text through the brain, then pushes the new lens state to all clients."""
+    reply_text = await process_user_input(request.message)
     await manager.broadcast_state()
-    
     return ChatResponse(reply=reply_text)
+
+
+@app.post("/api/nodes/{node_id}/complete")
+async def complete_node(node_id: int):
+    """Deterministic completion for the card checkmark — no LLM round-trip."""
+    completed = models.complete_nodes([node_id])
+    if not completed:
+        raise HTTPException(status_code=404, detail=f"Node {node_id} not found")
+    await manager.broadcast_state()
+    return {"success": True, "node_id": node_id}
+
+
+@app.get("/api/lens")
+async def get_lens():
+    return {"data": scoring.get_lens_state()}
+
 
 @app.websocket("/ws")
 async def websocket_endpoint(websocket: WebSocket):
     await manager.connect(websocket)
     try:
         while True:
-            # We don't expect messages from the client over WS, just listen for disconnects
+            # Clients don't send over WS; this just detects disconnects.
             await websocket.receive_text()
     except WebSocketDisconnect:
         manager.disconnect(websocket)
+
 
 @app.get("/")
 async def serve_index():
     return FileResponse("index.html")
 
+
 if __name__ == "__main__":
     import uvicorn
-    # Optional: run standard Uvicorn setup if file is executed directly
     uvicorn.run("app.main:app", host="127.0.0.1", port=8000, reload=True)

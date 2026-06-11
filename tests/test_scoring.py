@@ -1,0 +1,87 @@
+from datetime import datetime, timedelta, timezone
+
+from app.engine import scoring
+
+
+NOW = datetime(2026, 6, 11, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def make_node(node_id, content="task", *, focus_score=0.0, focused_at=None,
+              target_date=None, created_at=None, status="active"):
+    return {
+        "id": node_id,
+        "content": content,
+        "status": status,
+        "focus_score": focus_score,
+        "focused_at": focused_at,
+        "target_date": target_date,
+        "created_at": created_at or "2026-01-01 00:00:00",
+        "node_type": "task",
+    }
+
+
+def ts(dt):
+    return dt.strftime("%Y-%m-%d %H:%M:%S")
+
+
+def test_lens_shows_only_qualifying_items_not_padded_to_seven():
+    today = datetime.now().date()
+    nodes = [
+        make_node(1, target_date=today.isoformat()),
+        make_node(2, target_date=(today + timedelta(days=3)).isoformat()),
+        make_node(3, focus_score=10.0, focused_at=ts(NOW - timedelta(hours=1))),
+    ]
+    # Plenty of active-but-irrelevant nodes that must NOT appear
+    nodes += [make_node(10 + i) for i in range(10)]
+
+    lens = scoring.compute_lens(nodes, [], now=NOW)
+    assert {entry["id"] for entry in lens} == {1, 2, 3}
+
+
+def test_lens_caps_at_seven():
+    today = datetime.now().date()
+    nodes = [make_node(i, target_date=today.isoformat()) for i in range(1, 15)]
+    lens = scoring.compute_lens(nodes, [], now=NOW)
+    assert len(lens) == scoring.MAX_LENS_CARDS
+
+
+def test_empty_lens_when_nothing_qualifies():
+    nodes = [make_node(i) for i in range(1, 6)]
+    assert scoring.compute_lens(nodes, [], now=NOW) == []
+
+
+def test_focus_decays_over_time():
+    fresh = make_node(1, focus_score=10.0, focused_at=ts(NOW - timedelta(hours=1)))
+    stale = make_node(2, focus_score=10.0, focused_at=ts(NOW - timedelta(hours=48)))
+    lens = scoring.compute_lens([fresh, stale], [], now=NOW)
+    assert [entry["id"] for entry in lens] == [1]
+
+
+def test_blocker_of_qualifying_node_is_promoted_and_ranked_above_it():
+    today = datetime.now().date()
+    blocked = make_node(1, target_date=today.isoformat())
+    blocker = make_node(2)  # no deadline/focus of its own
+    edges = [{"parent_id": 2, "child_id": 1, "relationship": "blocks"}]
+    lens = scoring.compute_lens([blocked, blocker], edges, now=NOW)
+    ids = [entry["id"] for entry in lens]
+    assert ids.index(2) < ids.index(1)
+    assert next(e for e in lens if e["id"] == 2)["category"] == scoring.CATEGORY_NEXT
+
+
+def test_recently_captured_node_qualifies_briefly():
+    new = make_node(1, created_at=ts(NOW - timedelta(minutes=10)))
+    old = make_node(2, created_at=ts(NOW - timedelta(hours=10)))
+    lens = scoring.compute_lens([new, old], [], now=NOW)
+    assert [entry["id"] for entry in lens] == [1]
+
+
+def test_categories():
+    today = datetime.now().date()
+    focused = make_node(1, focus_score=10.0, focused_at=ts(NOW - timedelta(minutes=5)))
+    due_today = make_node(2, target_date=today.isoformat())
+    horizon = make_node(3, target_date=(today + timedelta(days=6)).isoformat())
+    lens = scoring.compute_lens([focused, due_today, horizon], [], now=NOW)
+    by_id = {entry["id"]: entry["category"] for entry in lens}
+    assert by_id[1] == scoring.CATEGORY_FOCUS
+    assert by_id[2] == scoring.CATEGORY_NEXT
+    assert by_id[3] == scoring.CATEGORY_HORIZON
