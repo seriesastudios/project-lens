@@ -142,16 +142,18 @@ def build_cases(ids):
          expect_tool("update_task", lambda a: True if a["node_id"] == ids["landing"] and a.get("status") == "on_hold" else f"args {a}")),
         ("dependency", "buying groceries is blocked by sending the invoices",
          expect_tool("link_tasks", lambda a: True if a["relationship"] == "blocks" and a["parent_id"] == ids["invoices"] else f"args {a}")),
-        ("focus project", "let's focus on the website redesign",
-         expect_tool("focus_lens", lambda a: True if ids["mockups"] in a["node_ids"] or ids["website"] in a["node_ids"] else f"ids {a['node_ids']}")),
+        ("focus project opens project view", "let's focus on the website redesign",
+         expect_tool("open_view", lambda a: True if a["view"] == "project" and "website" in (a.get("project_name") or "").lower() else f"args {a}")),
         ("what to work on", "what should I be working on right now?",
-         expect_tool("focus_lens")),
-        ("list query goes to lens", "what are my errands?",
-         expect_tool("focus_lens")),
-        ("what's-left query goes to lens", "what's left to do on the website redesign?",
-         expect_tool("focus_lens", lambda a: True if {ids["website"], ids["mockups"], ids["landing"]} & set(a["node_ids"]) else f"ids {a['node_ids']}")),
-        ("clear lens", "clear the lens please",
-         expect_tool("clear_focus")),
+         expect_tool("open_view", lambda a: True if a["view"] in ("today", "projects") else f"args {a}")),
+        ("category query becomes a list view", "what are my errands?",
+         expect_tool("open_view", lambda a: True if a["view"] == "list" and a.get("node_ids") else f"args {a}")),
+        ("what's-left query opens project view", "what's left to do on the website redesign?",
+         expect_tool("open_view", lambda a: True if a["view"] == "project" and "website" in (a.get("project_name") or "").lower() else f"args {a}")),
+        ("show all projects", "show me all my projects",
+         expect_tool("open_view", lambda a: True if a["view"] == "projects" else f"args {a}")),
+        ("back to today", "ok go back to my day",
+         expect_tool("open_view", lambda a: True if a["view"] == "today" else f"args {a}")),
         ("single fact in chat", "when is the dentist appointment due?",
          expect_no_tool),
         ("chitchat no capture", "ugh, today was completely exhausting",
@@ -166,6 +168,7 @@ def reset_db():
         conn.execute("DELETE FROM edges")
         conn.execute("DELETE FROM nodes")
         conn.execute("DELETE FROM history_digest")
+        conn.execute("DELETE FROM app_state")  # view state is sticky by design
 
 
 async def main():

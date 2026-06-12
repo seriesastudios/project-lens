@@ -17,7 +17,7 @@ import calendar as _calendar
 
 import dateparser
 from openai import AsyncOpenAI
-from pydantic import BaseModel, Field, ValidationError, field_validator
+from pydantic import BaseModel, Field, ValidationError, field_validator, model_validator
 
 from app.config import config
 from app.database import models
@@ -31,11 +31,11 @@ client = AsyncOpenAI(
 MAX_TOOL_ROUNDS = 5
 HISTORY_TURNS = 12  # user+assistant messages kept as session memory (tokens are latency)
 
-# Small models occasionally write the tool call as prose ("focus_lens [{...}]")
+# Small models occasionally write the tool call as prose ("open_view [{...}]")
 # instead of emitting a real one. LM Studio ignores tool_choice="required" and
 # corrective retries come back empty, so we salvage by parsing the leaked text.
 TOOL_NAME_LEAK = re.compile(
-    r"\b(capture_tasks|complete_tasks|update_task|link_tasks|focus_lens|clear_focus|search_tasks)\b")
+    r"\b(capture_tasks|complete_tasks|update_task|link_tasks|open_view|search_tasks)\b")
 
 
 class _SalvagedFunction:
@@ -81,9 +81,25 @@ def salvage_tool_call(text: str) -> Optional[_SalvagedCall]:
                 parsed = None
             break
 
-    if name == "clear_focus":
-        return _SalvagedCall(name, {})
-    if name in ("focus_lens", "complete_tasks"):
+    if name == "open_view":
+        if isinstance(parsed, dict) and parsed.get("view"):
+            return _SalvagedCall(name, parsed)
+        # Non-JSON leak ('open_view[view="project", project_name="The Cage"]'):
+        # pull the fields out of the prose.
+        view_match = re.search(r"view\s*[=:]\s*['\"]?(today|projects|project|list|loose)", rest[:200])
+        if not view_match:
+            return None
+        args: dict = {"view": view_match.group(1)}
+        name_match = re.search(r"project_name\s*[=:]\s*['\"]([^'\"]+)['\"]", rest[:300])
+        if name_match:
+            args["project_name"] = name_match.group(1)
+        if args["view"] == "list":
+            ids = [int(n) for n in re.findall(r"\d+", rest[:300])]
+            if not ids:
+                return None
+            args["node_ids"] = ids
+        return _SalvagedCall(name, args)
+    if name == "complete_tasks":
         if isinstance(parsed, list):
             ids = _coerce_ids(parsed)
             return _SalvagedCall(name, {"node_ids": ids}) if ids else None
@@ -92,7 +108,7 @@ def salvage_tool_call(text: str) -> Optional[_SalvagedCall]:
                 return _SalvagedCall(name, parsed)
             ids = _coerce_ids([parsed])
             return _SalvagedCall(name, {"node_ids": ids}) if ids else None
-        # Non-JSON leak ("focus_lens[node_ids=[6,5]]", "focus_lens for tasks 3 and 5"):
+        # Non-JSON leak ("complete_tasks[node_ids=[6,5]]", "complete_tasks 3 and 5"):
         # extract the integers — bogus IDs get filtered against the DB downstream.
         ids = [int(n) for n in re.findall(r"\d+", rest[:200])]
         return _SalvagedCall(name, {"node_ids": ids}) if ids else None
@@ -121,17 +137,22 @@ seen_node_ids: set = set()
 
 SYSTEM_PROMPT_TEMPLATE = """You are Lens-Brain, the action engine of Project Lens, a personal task manager. Your job on every user message: decide which rule below applies, then CALL THE MATCHING TOOL. Tool calls are the only way anything happens — text output never creates, completes, or shows a task. Do not describe an action in text; perform it with a tool call.
 
-The user sees this chat plus "The Lens", a panel of task cards. focus_lens controls what appears there. Tasks are shown in the Lens, never listed in chat.
+The user sees this chat plus "The Lens", a navigable panel of task cards — like the main pane of a project manager app. open_view steers it between views: today (most urgent), projects (overview), one project's tasks, or an ad-hoc list. Tasks are shown in the Lens, never listed in chat.
 
 RULES
 0. Act ONLY on the user's LATEST message. Earlier conversation is context for resolving references — everything in it has already been handled; never re-capture or re-complete from it.
-0b. TRIAGE FIRST: is the latest message NEW work, or about a task in ACTIVE TASKS? New work → capture_tasks immediately (no search_tasks first, no update_task) — even when the message says "critical"/"really important" (that goes in the new task's priority field). Only use update_task/complete_tasks when the task's subject matter actually appears in ACTIVE TASKS. Example: "Really important: I have to send the grant application" with no grant task listed → capture_tasks {{"tasks": [{{"content": "Send the grant application", "priority": "high"}}]}} — NOT update_task on some other task.
+0b. TRIAGE FIRST: is the latest message NEW work, or about a task in ACTIVE TASKS? New work → capture_tasks immediately (no search_tasks first, no update_task) — even when the message says "critical"/"really important" (that goes in the new task's priority field). Only use update_task/complete_tasks when the task's subject matter actually appears in ACTIVE TASKS. Example: "Really important: I have to send the grant application" with no grant task listed → capture_tasks {"tasks": [{"content": "Send the grant application", "priority": "high"}]} — NOT update_task on some other task.
 1. The user mentions new work, a goal, or a commitment → call capture_tasks with EVERY distinct task in the message. A project with steps → one item with node_type "project" and the steps in subtasks. Set parent_id when it clearly belongs to an existing item. If they signal importance about the NEW work ("critical", "really important", "must do") set priority "high" on it ("no rush"/"whenever" → "low") — still capture_tasks, never update_task. Never capture anything already in ACTIVE TASKS.
 2. Deadlines: pass the deadline exactly as the user said it ("Friday", "end of month", "June 3") or as YYYY-MM-DD — the system converts relative dates itself. No date stated or implied → omit the field, never invent one.
 3. The user finished something → call complete_tasks with ALL matching IDs from ACTIVE TASKS, in one call. Match loosely: "sent the invoices" matches "Send invoices to clients". Never create a task for finished work; if nothing matches, ask one short question.
 4. Reword, change deadline, change importance, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change. update_task is for tasks that ALREADY EXIST in ACTIVE TASKS. Importance words about an existing task ("X is critical" → priority high; "X is low priority, no rush" → low). Set priority ONLY when the user signals it — never infer it.
 5. A dependency or grouping is stated → call link_tasks. The BLOCKER is always parent_id: "X blocks Y" → X is parent_id; "Y is blocked by X" → X is still parent_id. Use is_part_of for project/subtask grouping.
-6. ANY request to see tasks goes through focus_lens, never a text answer: "focus on X", "what are my tasks", "what should I work on", "what's left / what remains on X", "where am I on X", "show me X". Call focus_lens with ALL matching active IDs (include a project's subtasks). Category words ("errands", "chores", "admin") → judge which ACTIVE TASKS fit yourself and pass those IDs. NEVER list tasks in chat, and never say tasks are in the Lens unless you called focus_lens this turn. Call clear_focus when asked to clear or reset the Lens.
+6. ANY request to see tasks is NAVIGATION — call open_view, never answer with a text list:
+   - "focus on X" / "let's work on X" / "open X" / "what's left on X" / "where am I on X" → open_view {"view": "project", "project_name": "X"}. Pass the project's name as the user said it — the system finds the project and shows ALL its open tasks itself. Do NOT pass node_ids and do NOT search first.
+   - "what are my projects" / "show my projects" / "what's on my plate" → open_view {"view": "projects"}.
+   - "what should I work on" / "show today" / "what's urgent" / "go back" / "clear the lens" → open_view {"view": "today"}.
+   - Category words ("errands", "chores", "admin"): judge which ACTIVE TASKS fit (search_tasks first if needed) → open_view {"view": "list", "node_ids": [...], "label": "errands"}.
+   NEVER list tasks in chat, and never say the Lens shows something unless you called open_view this turn.
 7. "that", "it", "the second one" → resolve from the recent conversation and ACTIVE TASKS; if genuinely ambiguous, ask one short question — never guess an ID. A correction ("no, I meant Friday") → call update_task on the existing task, never capture a new one.
 8. ACTIVE TASKS is only the slice of the database relevant to this conversation. If the user refers to an EXISTING task or project that is NOT listed, call search_tasks with 2-3 keywords first, then act on the results. Never claim a task doesn't exist without searching. Do NOT search before capturing new work — rule 1 applies directly. Search results marked "on_hold" are shelved projects/tasks; when the user wants to resume or activate one, call update_task with status "active".
 
@@ -146,7 +167,7 @@ CALENDAR (use this table for any relative date — do not compute weekdays yours
 {calendar}
 ACTIVE TASKS (use these exact IDs in tool calls):
 {task_list}
-FOCUSED NOW: {focus_list}"""
+LENS CURRENTLY SHOWS: {view_desc}"""
 
 POST_TOOL_REMINDER = (
     "Tools executed. Now reply to the user in at most two short sentences confirming what "
@@ -176,27 +197,29 @@ CONTEXT_MAX_TASKS = 20
 
 
 def select_context_tasks(active_nodes: List[dict], conversation_text: str,
-                         now: Optional[datetime] = None) -> List[dict]:
+                         now: Optional[datetime] = None,
+                         view_ids: Optional[set] = None) -> List[dict]:
     """Tasks live in the database; the prompt gets only what this turn could
-    plausibly touch: focused tasks, near deadlines, fresh captures, and
-    full-text matches against the recent conversation."""
+    plausibly touch: what's on screen (the open view), near deadlines, fresh
+    captures, and full-text matches against the recent conversation."""
     if len(active_nodes) <= CONTEXT_FULL_THRESHOLD:
         return active_nodes
 
     from app.engine import scoring
     now = now or datetime.now(timezone.utc)
     today = datetime.now().date()
+    view_ids = view_ids or set()
 
-    # Priority buckets: when the cap bites, conversation matches and focused
-    # tasks survive; "recently captured" noise is the first to drop.
+    # Priority buckets: when the cap bites, what the user is LOOKING AT and
+    # conversation matches survive; "recently captured" noise is first to drop.
     from app.engine import retrieval
-    focused, matched, due_soon, recent = [], [], [], []
+    on_screen, matched, due_soon, recent = [], [], [], []
     matched_ids = {n["id"] for n in retrieval.search_active(conversation_text, limit=15)}
 
     for node in active_nodes:
         deadline = scoring._parse_deadline(node.get("target_date"))
-        if scoring._effective_focus(node, now) > 0:
-            focused.append(node)
+        if node["id"] in view_ids:
+            on_screen.append(node)
         elif node["id"] in matched_ids:
             matched.append(node)
         elif deadline is not None and (deadline - today).days <= scoring.DEADLINE_WINDOW_DAYS:
@@ -206,12 +229,16 @@ def select_context_tasks(active_nodes: List[dict], conversation_text: str,
 
     # Recent captures are a courtesy (FTS on the conversation usually re-finds
     # them anyway); cap them so a bulk seed doesn't flood the prompt.
-    return (focused + matched + due_soon + recent[-10:])[:CONTEXT_MAX_TASKS]
+    return (on_screen + matched + due_soon + recent[-10:])[:CONTEXT_MAX_TASKS]
 
 
 def format_context_prompt(user_text: str = "") -> str:
+    from app.engine import views
+
     now = datetime.now()
     active_nodes = models.get_active_nodes()
+    view = views.get_view()
+    view_ids = set(views.view_member_ids(view))
 
     # Search against the latest message plus recent user turns, so references
     # like "that one" still surface the task discussed a moment ago.
@@ -219,10 +246,11 @@ def format_context_prompt(user_text: str = "") -> str:
         msg["content"] for msg in list(conversation_history)[-6:]
         if isinstance(msg, dict) and msg.get("role") == "user"
     )
-    context_nodes = select_context_tasks(active_nodes, f"{user_text} {recent_user_text}")
+    context_nodes = select_context_tasks(
+        active_nodes, f"{user_text} {recent_user_text}", view_ids=view_ids)
 
     seen_node_ids.update(n["id"] for n in context_nodes)
-    seen_node_ids.update(n["id"] for n in active_nodes if (n.get("focus_score") or 0) > 0)
+    seen_node_ids.update(view_ids)
 
     if context_nodes:
         lines = []
@@ -244,14 +272,26 @@ def format_context_prompt(user_text: str = "") -> str:
     else:
         task_list = "No active tasks."
 
-    focused = [f"[ID {n['id']}] {n['content']}" for n in active_nodes if (n.get("focus_score") or 0) > 0]
-    focus_list = "; ".join(focused) if focused else "nothing"
+    mode = view["mode"]
+    if mode == "project":
+        project = models.get_node(view["project_id"])
+        project_name = project["content"] if project else "a project"
+        view_desc = (f"the project '{project_name}' (ID {view['project_id']}) — "
+                     "'here'/'this project' in the user's message means this one")
+    elif mode == "projects":
+        view_desc = "the all-projects overview"
+    elif mode == "list":
+        view_desc = f"a list: {view.get('label') or 'selected tasks'}"
+    elif mode == "loose":
+        view_desc = "tasks that belong to no project"
+    else:
+        view_desc = "Today (the most urgent tasks)"
 
     return CONTEXT_TEMPLATE.format(
         now=now.strftime("%A, %Y-%m-%d %H:%M"),
         calendar=_calendar_table(now),
         task_list=task_list,
-        focus_list=focus_list,
+        view_desc=view_desc,
     )
 
 
@@ -379,8 +419,26 @@ class LinkTasksArgs(BaseModel):
         return value
 
 
-class FocusLensArgs(BaseModel):
-    node_ids: List[int] = Field(min_length=1)
+class OpenViewArgs(BaseModel):
+    view: str
+    project_name: Optional[str] = None
+    node_ids: Optional[List[int]] = None
+    label: Optional[str] = None
+
+    @field_validator("view")
+    @classmethod
+    def check_view(cls, value):
+        if value not in ("today", "projects", "project", "list", "loose"):
+            raise ValueError("view must be one of: today, projects, project, list")
+        return value
+
+    @model_validator(mode="after")
+    def check_required_fields(self):
+        if self.view == "project" and not (self.project_name or "").strip():
+            raise ValueError("view 'project' requires project_name (the project as the user named it)")
+        if self.view == "list" and not self.node_ids:
+            raise ValueError("view 'list' requires node_ids (IDs from ACTIVE TASKS or search results)")
+        return self
 
 
 class SearchTasksArgs(BaseModel):
@@ -468,23 +526,18 @@ LENS_TOOLS: Any = [
     {
         "type": "function",
         "function": {
-            "name": "focus_lens",
-            "description": "Show specific tasks in the Lens pane. Replaces the current focus set. Use whenever the user asks to focus on something, asks what their tasks are, or asks what to work on. Include ALL matching active task IDs.",
+            "name": "open_view",
+            "description": "Navigate the Lens pane, like clicking around a project manager app. 'project' opens one project and shows ALL its open tasks — pass project_name as the user said it, the system finds it. 'projects' shows the all-projects overview. 'today' returns to the default most-urgent view (also for 'go back' / 'clear'). 'list' shows specific tasks by ID (for category requests, after picking IDs).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "node_ids": {"type": "array", "items": {"type": "integer"}, "description": "IDs of every task to spotlight."}
+                    "view": {"type": "string", "enum": ["today", "projects", "project", "list"], "description": "Which view to open."},
+                    "project_name": {"type": "string", "description": "For view 'project': the project's name as the user referred to it (e.g. 'The Cage')."},
+                    "node_ids": {"type": "array", "items": {"type": "integer"}, "description": "For view 'list': the task IDs to show."},
+                    "label": {"type": "string", "description": "For view 'list': a short title, e.g. 'errands'."}
                 },
-                "required": ["node_ids"]
+                "required": ["view"]
             }
-        }
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "clear_focus",
-            "description": "Clear the Lens focus so it returns to showing only deadline-driven items. Use when the user asks to clear/reset the Lens.",
-            "parameters": {"type": "object", "properties": {}}
         }
     },
     {
@@ -588,27 +641,45 @@ def _execute_link(args: LinkTasksArgs) -> dict:
             "relationship": args.relationship}
 
 
-def _execute_focus(args: FocusLensArgs) -> dict:
-    # Focusing a project means focusing its open tasks — expand deterministically
-    # rather than relying on the model to enumerate subtask IDs.
-    expanded = list(args.node_ids)
-    for node_id in args.node_ids:
-        node = models.get_node(node_id)
-        if node and node.get("node_type") == "project":
-            expanded.extend(i for i in models.get_active_child_ids(node_id) if i not in expanded)
-    seen_node_ids.update(expanded)
+def _execute_open_view(args: OpenViewArgs) -> dict:
+    """Navigation: the model names a destination; Python resolves it into a view.
+    The model never picks which tasks a project view contains — that's a query."""
+    from app.engine import views
 
-    focused = models.set_focus(expanded)
-    missing = [node_id for node_id in args.node_ids if node_id not in focused]
-    result = {"success": bool(focused), "focused_ids": focused}
-    if missing:
-        result["unknown_ids"] = missing
+    if args.view == "project":
+        resolved = views.resolve_project(args.project_name or "")
+        if isinstance(resolved, list):
+            if not resolved:
+                return {"error": (f"No project found matching {args.project_name!r}. "
+                                  "If the user wants tasks (not a project), use search_tasks + "
+                                  "a 'list' view; if it's a NEW project, capture it first.")}
+            return {"error": f"Multiple projects match {args.project_name!r} — ask the user which one.",
+                    "candidates": [{"id": p["id"], "name": p["content"]} for p in resolved]}
+        if resolved["status"] != "active":
+            return {"error": (f"Project '{resolved['content']}' is on hold. To work on it, "
+                              "resume it first with update_task status 'active', then open it.")}
+        views.set_view({"mode": "project", "project_id": resolved["id"]})
+        open_ids = models.get_active_child_ids(resolved["id"])
+        seen_node_ids.update(open_ids)
+        seen_node_ids.add(resolved["id"])
+        return {"success": True, "view": "project", "project": resolved["content"],
+                "open_tasks": len(open_ids)}
+
+    if args.view == "list":
+        active = [i for i in models.existing_node_ids(args.node_ids or [])
+                  if (models.get_node(i) or {}).get("status") == "active"]
+        if not active:
+            return {"error": "None of those IDs are active tasks. Use IDs from ACTIVE TASKS or search_tasks results."}
+        views.set_view({"mode": "list", "node_ids": active, "label": args.label or "selected tasks"})
+        return {"success": True, "view": "list", "label": args.label or "selected tasks",
+                "shown": len(active)}
+
+    views.set_view({"mode": args.view})
+    result = {"success": True, "view": args.view}
+    if args.view == "projects":
+        result["project_count"] = sum(
+            1 for n in models.get_active_nodes() if n.get("node_type") == "project")
     return result
-
-
-def _execute_clear_focus() -> dict:
-    models.clear_all_focus()
-    return {"success": True}
 
 
 def _execute_search(args: SearchTasksArgs) -> dict:
@@ -622,7 +693,7 @@ def _execute_search(args: SearchTasksArgs) -> dict:
              **({"status": "on_hold"} if n.get("status") == "on_hold" else {})}
             for n in results
         ],
-        "hint": "Use these IDs with focus_lens / complete_tasks / update_task / link_tasks."
+        "hint": "Use these IDs with open_view (list) / complete_tasks / update_task / link_tasks."
         if results else ("No matches in the database. If the user is describing NEW work, "
                          "call capture_tasks now. If they referred to an existing task, "
                          "try other keywords or tell them it wasn't found."),
@@ -634,14 +705,16 @@ TOOL_HANDLERS = {
     "complete_tasks": (CompleteTasksArgs, _execute_complete),
     "update_task": (UpdateTaskArgs, _execute_update),
     "link_tasks": (LinkTasksArgs, _execute_link),
-    "focus_lens": (FocusLensArgs, _execute_focus),
+    "open_view": (OpenViewArgs, _execute_open_view),
     "search_tasks": (SearchTasksArgs, _execute_search),
 }
 
 
 def _referenced_ids(func_name: str, args) -> List[int]:
-    if func_name in ("complete_tasks", "focus_lens"):
+    if func_name == "complete_tasks":
         return list(args.node_ids)
+    if func_name == "open_view":
+        return list(args.node_ids or [])  # 'list' views must use IDs the model has seen
     if func_name == "update_task":
         return [args.node_id]
     if func_name == "link_tasks":
@@ -658,9 +731,6 @@ def execute_tool_call(call, enforce_grounding: bool = False) -> str:
     (context, search results, own captures) is rejected — models guess
     plausible-looking IDs, and a guessed ID can hit the wrong real task."""
     func_name = call.function.name
-
-    if func_name == "clear_focus":
-        return json.dumps(_execute_clear_focus())
 
     handler = TOOL_HANDLERS.get(func_name)
     if handler is None:
@@ -757,16 +827,21 @@ def template_confirmation(executed: List[tuple]) -> Optional[str]:
             else:
                 sentences.append(f"Linked **{parent}** and **{child}**.")
 
-        elif name == "focus_lens":
-            from app.engine import scoring
-            state = scoring.get_lens_state()
-            if state["focus"]:
-                sentences.append(f"Your Lens now shows **{state['focus']['label']}**.")
+        elif name == "open_view":
+            view = result.get("view")
+            if view == "project":
+                count = result.get("open_tasks", 0)
+                plural = "task" if count == 1 else "tasks"
+                sentences.append(f"Opened **{result['project']}** — {count} open {plural}.")
+            elif view == "projects":
+                count = result.get("project_count", 0)
+                sentences.append(f"Showing your **{count} projects**.")
+            elif view == "list":
+                count = result.get("shown", 0)
+                plural = "task" if count == 1 else "tasks"
+                sentences.append(f"Showing **{result.get('label', 'selection')}** — {count} {plural}.")
             else:
-                sentences.append(f"Focused {len(result.get('focused_ids', []))} tasks — see the Lens.")
-
-        elif name == "clear_focus":
-            sentences.append("Lens cleared.")
+                sentences.append("Here's your day.")
 
         # search_tasks contributes no sentence; an action that followed it speaks
 
@@ -816,7 +891,7 @@ async def process_user_input(user_text: str) -> str:
                 salvage_attempted = True
                 salvaged = salvage_tool_call(content)
                 if salvaged is None:
-                    # Leak detected but unparseable ("focus_lens with the errand
+                    # Leak detected but unparseable ("open_view with the errand
                     # tasks...") — nudge once and let the model emit it properly.
                     messages.append({"role": "assistant", "content": content})
                     messages.append({"role": "system", "content": (

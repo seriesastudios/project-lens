@@ -150,11 +150,28 @@
             node.priority === 'high' ? 'border-l-4 border-l-rose-400'
           : node.priority === 'low'  ? 'border-l-4 border-l-gray-300 opacity-75' : '';
 
-        const buildCard = (node, index, chipName) => {
+        // Deterministic click navigation — the server broadcasts the new view.
+        const setView = (body) =>
+            fetch('/api/view', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            }).catch(console.error);
+
+        const enterNode = (node) => {
+            if (node.pseudo === 'loose') return setView({ mode: 'loose' });
+            return setView({ mode: 'project', project_id: node.id });
+        };
+
+        const buildCard = (node, index, chipName, clickable) => {
             const colorClass = CATEGORY_TOKENS[node.category] || CATEGORY_TOKENS.undated;
             const el = document.createElement('div');
             el.className = `card-enter border rounded-[1.25rem] p-5 transition-all duration-300 hover:scale-[1.01] hover:shadow-md ${colorClass} ${priorityClasses(node)}`;
             el.style.animationDelay = `${index * 0.05}s`;
+            if (clickable) {
+                el.classList.add('cursor-pointer');
+                el.addEventListener('click', () => enterNode(node));
+            }
 
             const row = document.createElement('div');
             row.className = 'flex items-start justify-between gap-4';
@@ -171,7 +188,8 @@
                 badge.className = 'text-[10px] font-bold uppercase tracking-widest opacity-60 mb-1.5 flex items-center gap-1';
                 badge.innerHTML = '<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7v10a2 2 0 002 2h14a2 2 0 002-2V9a2 2 0 00-2-2h-6l-2-2H5a2 2 0 00-2 2z"></path></svg>';
                 const badgeText = document.createTextNode(
-                    'Project' + (node.project_open_total ? ` · ${node.project_open_total} open` : ''));
+                    (node.pseudo === 'loose' ? 'No project' : 'Project')
+                    + (node.project_open_total ? ` · ${node.project_open_total} open` : ''));
                 badge.appendChild(badgeText);
                 body.appendChild(badge);
             } else if (chipName) {
@@ -185,12 +203,6 @@
             title.className = isProject
                 ? 'text-[15px] font-semibold leading-snug tracking-tight'
                 : 'text-[15px] font-medium leading-snug tracking-tight';
-            if (node.focused) {
-                const dot = document.createElement('span');
-                dot.className = 'inline-block w-1.5 h-1.5 rounded-full bg-orange-400 mr-2 mb-0.5';
-                dot.title = 'In focus';
-                title.appendChild(dot);
-            }
             title.appendChild(document.createTextNode(node.content));
             body.appendChild(title);
 
@@ -219,41 +231,61 @@
         };
 
         // Render Cards (all text injected via textContent — never raw HTML)
-        const renderNodes = (nodes, focus) => {
+        const renderNodes = (nodes, view) => {
             nodeContainer.innerHTML = '';
+            const mode = view ? view.mode : 'today';
 
-            if (focus) {
+            // View breadcrumb: where you are, and the way back (views are
+            // sticky — they only change when you navigate, by chat or click).
+            if (view && view.back) {
                 const bar = document.createElement('div');
-                bar.className = 'flex items-center justify-between px-4 py-2.5 mb-1 bg-orange-50/80 border border-orange-200/60 rounded-xl text-sm text-orange-900 card-enter';
+                bar.className = 'flex items-center gap-2 px-3 py-2.5 mb-1 bg-orange-50/80 border border-orange-200/60 rounded-xl text-sm text-orange-900 card-enter';
+                const backBtn = document.createElement('button');
+                backBtn.className = 'text-orange-400 hover:text-orange-700 font-semibold px-1.5 transition-colors';
+                backBtn.title = 'Back to Today';
+                backBtn.textContent = '◂';
+                backBtn.addEventListener('click', () => setView({ mode: 'today' }));
                 const label = document.createElement('span');
                 label.className = 'font-medium';
-                const fade = focus.hours_left != null ? ` · fades in ~${focus.hours_left}h` : '';
-                label.textContent = `Focused: ${focus.label}${fade}`;
-                const clearBtn = document.createElement('button');
-                clearBtn.className = 'text-orange-400 hover:text-orange-700 font-semibold px-1.5 transition-colors';
-                clearBtn.title = 'Clear focus';
-                clearBtn.textContent = '✕';
-                clearBtn.addEventListener('click', () => fetch('/api/focus/clear', { method: 'POST' }));
+                label.textContent = `${view.label} · ${view.count} open`;
+                bar.appendChild(backBtn);
                 bar.appendChild(label);
-                bar.appendChild(clearBtn);
                 nodeContainer.appendChild(bar);
             }
 
             if (!nodes || nodes.length === 0) {
                 const empty = document.createElement('div');
                 empty.className = 'text-center py-20 text-gray-400 text-sm italic font-medium';
-                empty.textContent = 'The Lens is clear.';
+                empty.textContent = mode === 'today' ? 'The Lens is clear.' : 'Nothing open here.';
                 nodeContainer.appendChild(empty);
                 return;
             }
 
-            // Cluster cards by project, preserving score order between groups.
+            // Projects overview: every card is a door — click to enter.
+            if (mode === 'projects') {
+                nodes.forEach((node, index) => {
+                    nodeContainer.appendChild(buildCard(node, index, null, true));
+                });
+                return;
+            }
+
+            // Inside a project / list / loose view: a flat, urgency-sorted
+            // list. The breadcrumb names the container, so no chips needed.
+            if (mode !== 'today') {
+                nodes.forEach((node, index) => {
+                    nodeContainer.appendChild(buildCard(node, index, null, false));
+                });
+                return;
+            }
+
+            // Today: cluster cards by project, preserving score order between
+            // groups. Group headers are clickable — they open the project.
             const groups = [];
             const byKey = {};
             nodes.forEach((node) => {
                 const key = node.project_id ? `p${node.project_id}` : `s${node.id}`;
                 if (!byKey[key]) {
-                    byKey[key] = { name: node.project_name, total: node.project_open_total, cards: [] };
+                    byKey[key] = { id: node.project_id, name: node.project_name, total: node.project_open_total, cards: [] };
                     groups.push(byKey[key]);
                 }
                 byKey[key].cards.push(node);
@@ -266,10 +298,12 @@
                 const useHeader = group.name && group.cards.length >= 2;
                 if (useHeader) {
                     const header = document.createElement('div');
-                    header.className = 'flex items-baseline justify-between px-2 pt-2 card-enter';
+                    header.className = 'flex items-baseline justify-between px-2 pt-2 card-enter cursor-pointer group';
+                    header.title = `Open ${group.name}`;
+                    header.addEventListener('click', () => setView({ mode: 'project', project_id: group.id }));
                     const name = document.createElement('span');
-                    name.className = 'text-[11px] font-semibold uppercase tracking-widest text-gray-400';
-                    name.textContent = group.name;
+                    name.className = 'text-[11px] font-semibold uppercase tracking-widest text-gray-400 group-hover:text-orange-500 transition-colors';
+                    name.textContent = `${group.name} ▸`;
                     const count = document.createElement('span');
                     count.className = 'text-[11px] text-gray-300 font-medium';
                     count.textContent = `${group.cards.length} of ${group.total} open`;
@@ -278,7 +312,8 @@
                     nodeContainer.appendChild(header);
                 }
                 group.cards.forEach((node) => {
-                    nodeContainer.appendChild(buildCard(node, index, useHeader ? null : group.name));
+                    nodeContainer.appendChild(buildCard(node, index, useHeader ? null : group.name,
+                                                        node.node_type === 'project'));
                     index += 1;
                 });
             });
@@ -376,7 +411,7 @@
                 try {
                     const payload = JSON.parse(event.data);
                     if (payload.type === 'STATE_UPDATE') {
-                        renderNodes(payload.data, payload.focus);
+                        renderNodes(payload.data, payload.view);
                     }
                 } catch (e) {
                     console.error("Invalid WS payload", e);

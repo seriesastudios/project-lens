@@ -6,7 +6,7 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from app.engine import embeddings, scoring
+from app.engine import embeddings, views
 from app.engine.brain import process_user_input
 from app.database import models
 
@@ -41,8 +41,8 @@ class ConnectionManager:
 
     @staticmethod
     def _state_payload() -> str:
-        state = scoring.get_lens_state()
-        return json.dumps({"type": "STATE_UPDATE", "data": state["cards"], "focus": state["focus"]})
+        state = views.compute_view_cards()
+        return json.dumps({"type": "STATE_UPDATE", "data": state["cards"], "view": state["view"]})
 
     async def _send_state(self, websocket: WebSocket):
         await websocket.send_text(self._state_payload())
@@ -90,14 +90,30 @@ async def complete_node(node_id: int):
 
 @app.get("/api/lens")
 async def get_lens():
-    state = scoring.get_lens_state()
-    return {"data": state["cards"], "focus": state["focus"]}
+    state = views.compute_view_cards()
+    return {"data": state["cards"], "view": state["view"]}
 
 
-@app.post("/api/focus/clear")
-async def clear_focus():
-    """Deterministic clear for the focus header's ✕ — no LLM round-trip."""
-    models.clear_all_focus()
+class ViewRequest(BaseModel):
+    mode: str
+    project_id: int | None = None
+
+
+@app.post("/api/view")
+async def set_view(request: ViewRequest):
+    """Deterministic click navigation — entering a project or going back never
+    needs an LLM round-trip."""
+    if request.mode == "project":
+        if request.project_id is None:
+            raise HTTPException(status_code=422, detail="mode 'project' requires project_id")
+        node = models.get_node(request.project_id)
+        if not node or node.get("node_type") != "project" or node["status"] != "active":
+            raise HTTPException(status_code=404, detail=f"No active project {request.project_id}")
+        views.set_view({"mode": "project", "project_id": request.project_id})
+    elif request.mode in ("today", "projects", "loose"):
+        views.set_view({"mode": request.mode})
+    else:
+        raise HTTPException(status_code=422, detail=f"Unknown mode {request.mode!r}")
     await manager.broadcast_state()
     return {"success": True}
 

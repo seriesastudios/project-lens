@@ -1,7 +1,7 @@
 """Tests for retrieval-based prompt context: tasks live in the DB; the prompt
-only gets the subset relevant to the conversation."""
+only gets the subset relevant to the conversation (and the open view)."""
 from app.database import models
-from app.engine import brain
+from app.engine import brain, views
 
 
 def seed_many(count=40):
@@ -10,8 +10,10 @@ def seed_many(count=40):
         models.add_node(f"Generic background chore number {i}")
     ids["invoices"] = models.add_node("Send invoices to clients")
     ids["deadline"] = models.add_node("File quarterly taxes", target_date="2026-06-13")
-    ids["focused"] = models.add_node("Design new logo")
-    models.set_focus([ids["focused"]])
+    ids["project"] = models.add_node("Design studio", node_type="project")
+    ids["on_screen"] = models.add_node("Design new logo")
+    models.add_edge(ids["project"], ids["on_screen"], "is_part_of")
+    views.set_view({"mode": "project", "project_id": ids["project"]})
     return ids
 
 
@@ -38,12 +40,14 @@ def test_small_graphs_include_everything():
 def test_large_graphs_get_relevant_subset_only():
     ids = seed_many()
     active = models.get_active_nodes()
-    chosen = brain.select_context_tasks(active, "I just sent the invoices")
+    view_ids = set(views.view_member_ids())
+    chosen = brain.select_context_tasks(active, "I just sent the invoices",
+                                        view_ids=view_ids)
     chosen_ids = {n["id"] for n in chosen}
 
-    assert ids["invoices"] in chosen_ids   # FTS match on the message
-    assert ids["deadline"] in chosen_ids   # deadline inside the window
-    assert ids["focused"] in chosen_ids    # currently focused
+    assert ids["invoices"] in chosen_ids    # FTS match on the message
+    assert ids["deadline"] in chosen_ids    # deadline inside the window
+    assert ids["on_screen"] in chosen_ids   # member of the open view
     assert len(chosen) <= brain.CONTEXT_MAX_TASKS
     assert len(chosen) < len(active)
 
@@ -54,3 +58,14 @@ def test_prompt_notes_omitted_tasks():
     assert "Send invoices to clients" in prompt
     assert "more active tasks" in prompt
     assert "Generic background chore number 7" not in prompt
+
+
+def test_prompt_describes_current_view():
+    seed_many()
+    prompt = brain.format_context_prompt("hello")
+    assert "LENS CURRENTLY SHOWS" in prompt
+    assert "Design studio" in prompt
+
+    views.set_view({"mode": "today"})
+    prompt = brain.format_context_prompt("hello")
+    assert "Today" in prompt

@@ -122,6 +122,15 @@ def init_db():
             )
         ''')
 
+        # Small key-value store for app state, e.g. the current Lens view —
+        # views are sticky across restarts, so they live in the DB.
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS app_state (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL
+            )
+        ''')
+
 
 def add_node(content: str, status: str = 'active', target_date: Optional[str] = None,
              node_type: str = 'task', priority: str = 'normal') -> int:
@@ -214,23 +223,19 @@ def complete_nodes(node_ids: List[int]) -> List[int]:
     return valid
 
 
-def set_focus(node_ids: List[int], score: float = 10.0) -> List[int]:
-    """Replaces the focus set: clears all focus, then boosts the given nodes. Returns valid IDs."""
-    valid = existing_node_ids(node_ids)
-    now = utc_now_str()
+def get_state(key: str) -> Optional[str]:
     with DatabaseSession() as conn:
-        conn.execute("UPDATE nodes SET focus_score = 0.0, focused_at = NULL")
-        for node_id in valid:
-            conn.execute(
-                "UPDATE nodes SET focus_score = ?, focused_at = ? WHERE id = ?",
-                (score, now, node_id)
-            )
-    return valid
+        row = conn.execute("SELECT value FROM app_state WHERE key = ?", (key,)).fetchone()
+        return row["value"] if row else None
 
 
-def clear_all_focus():
+def set_state(key: str, value: str):
     with DatabaseSession() as conn:
-        conn.execute("UPDATE nodes SET focus_score = 0.0, focused_at = NULL")
+        conn.execute(
+            "INSERT INTO app_state (key, value) VALUES (?, ?) "
+            "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (key, value)
+        )
 
 
 def get_active_nodes(limit: Optional[int] = None) -> List[Dict[str, Any]]:

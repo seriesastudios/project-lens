@@ -96,17 +96,74 @@ def test_link_tasks_blocks_relationship():
     assert edges[0]["relationship"] == "blocks"
 
 
-def test_focus_lens_and_clear_focus():
-    a = models.add_node("Task A")
-    b = models.add_node("Task B")
-    result = json.loads(execute_tool_call(fake_call("focus_lens", {"node_ids": [a, b, 777]})))
-    assert result["focused_ids"] == [a, b]
-    assert result["unknown_ids"] == [777]
-    assert models.get_node(a)["focus_score"] == 10.0
+def test_open_view_project_resolves_name_and_sets_view():
+    from app.engine import views
+    project = models.add_node("Website redesign", node_type="project")
+    child = models.add_node("Finish mockups for site")
+    models.add_edge(project, child, "is_part_of")
 
-    result = json.loads(execute_tool_call(fake_call("clear_focus", {})))
+    result = json.loads(execute_tool_call(fake_call("open_view", {
+        "view": "project", "project_name": "website redesign"})))
     assert result["success"]
-    assert models.get_node(a)["focus_score"] == 0.0
+    assert result["project"] == "Website redesign"
+    assert result["open_tasks"] == 1
+    assert views.get_view() == {"mode": "project", "project_id": project}
+
+
+def test_open_view_unknown_project_errors_with_guidance():
+    result = json.loads(execute_tool_call(fake_call("open_view", {
+        "view": "project", "project_name": "moon base"})))
+    assert "error" in result
+
+
+def test_open_view_ambiguous_project_returns_candidates():
+    models.add_node("Website redesign", node_type="project")
+    models.add_node("Website copywriting", node_type="project")
+    result = json.loads(execute_tool_call(fake_call("open_view", {
+        "view": "project", "project_name": "website"})))
+    assert "error" in result
+    assert len(result["candidates"]) == 2
+
+
+def test_open_view_on_hold_project_suggests_resume():
+    models.add_node("Shelved film", node_type="project", status="on_hold")
+    result = json.loads(execute_tool_call(fake_call("open_view", {
+        "view": "project", "project_name": "shelved film"})))
+    assert "error" in result and "on hold" in result["error"]
+
+
+def test_open_view_today_and_projects_modes():
+    from app.engine import views
+    models.add_node("Some project", node_type="project")
+    result = json.loads(execute_tool_call(fake_call("open_view", {"view": "projects"})))
+    assert result["success"] and result["project_count"] == 1
+    assert views.get_view() == {"mode": "projects"}
+
+    result = json.loads(execute_tool_call(fake_call("open_view", {"view": "today"})))
+    assert result["success"]
+    assert views.get_view() == {"mode": "today"}
+
+
+def test_open_view_list_filters_inactive_ids():
+    from app.engine import views
+    a = models.add_node("Errand A")
+    b = models.add_node("Errand B")
+    models.complete_nodes([b])
+    result = json.loads(execute_tool_call(fake_call("open_view", {
+        "view": "list", "node_ids": [a, b, 999], "label": "errands"})))
+    assert result["success"] and result["shown"] == 1
+    assert views.get_view() == {"mode": "list", "node_ids": [a], "label": "errands"}
+
+    result = json.loads(execute_tool_call(fake_call("open_view", {
+        "view": "list", "node_ids": [999]})))
+    assert "error" in result
+
+
+def test_open_view_validation_requires_mode_fields():
+    result = json.loads(execute_tool_call(fake_call("open_view", {"view": "project"})))
+    assert "error" in result
+    result = json.loads(execute_tool_call(fake_call("open_view", {"view": "list"})))
+    assert "error" in result
 
 
 def test_invalid_json_arguments():
@@ -120,11 +177,17 @@ def test_unknown_function():
     assert "error" in result
 
 
-def test_salvage_parses_leaked_focus_lens_with_wrong_arg_shape():
+def test_salvage_parses_leaked_open_view_json_and_kwargs():
     from app.engine.brain import salvage_tool_call
-    call = salvage_tool_call('focus_lens [{"node_id": 1, "content": "Buy groceries"}, {"node_id": 2}]')
-    assert call.function.name == "focus_lens"
-    assert json.loads(call.function.arguments) == {"node_ids": [1, 2]}
+    call = salvage_tool_call('open_view {"view": "project", "project_name": "The Cage"}')
+    assert call.function.name == "open_view"
+    assert json.loads(call.function.arguments) == {"view": "project", "project_name": "The Cage"}
+
+    call = salvage_tool_call('open_view[view="project", project_name="The Cage"]')
+    assert json.loads(call.function.arguments) == {"view": "project", "project_name": "The Cage"}
+
+    call = salvage_tool_call("open_view(view=today)")
+    assert json.loads(call.function.arguments) == {"view": "today"}
 
 
 def test_salvage_parses_bare_id_list_and_dict_args():
@@ -166,8 +229,8 @@ def test_capture_skips_exact_duplicate_of_active_task():
 
 def test_salvage_parses_kwargs_style_leak():
     from app.engine.brain import salvage_tool_call
-    call = salvage_tool_call("focus_lens[node_ids=[6,5]]")
-    assert call.function.name == "focus_lens"
+    call = salvage_tool_call("complete_tasks[node_ids=[6,5]]")
+    assert call.function.name == "complete_tasks"
     assert json.loads(call.function.arguments) == {"node_ids": [6, 5]}
 
 
@@ -176,7 +239,7 @@ def test_search_tasks_tool_returns_ids_for_followup():
     models.add_node("Walk the dog")
     result = json.loads(execute_tool_call(fake_call("search_tasks", {"query": "cage grade"})))
     assert result["results"][0]["content"] == "Colour grade The Cage final cut"
-    assert "focus_lens" in result["hint"]
+    assert "open_view" in result["hint"]
     empty = json.loads(execute_tool_call(fake_call("search_tasks", {"query": "zzzqqq"})))
     assert empty["results"] == []
 
@@ -186,31 +249,29 @@ def test_grounding_rejects_unseen_ids_and_allows_seen():
     brain.reset_session()
     real = models.add_node("Grounded task")
     result = json.loads(execute_tool_call(
-        fake_call("focus_lens", {"node_ids": [real]}), enforce_grounding=True))
+        fake_call("open_view", {"view": "list", "node_ids": [real], "label": "x"}),
+        enforce_grounding=True))
     assert "error" in result and "search_tasks" in result["error"]
 
     search = json.loads(execute_tool_call(fake_call("search_tasks", {"query": "grounded"})))
     assert search["results"][0]["id"] == real
     result = json.loads(execute_tool_call(
-        fake_call("focus_lens", {"node_ids": [real]}), enforce_grounding=True))
+        fake_call("open_view", {"view": "list", "node_ids": [real], "label": "x"}),
+        enforce_grounding=True))
     assert result["success"]
     brain.reset_session()
 
 
-def test_focus_lens_expands_project_to_active_children():
+def test_open_view_project_needs_no_grounding():
+    # Navigation by NAME must work even for projects never shown to the model —
+    # resolution happens in Python, so there are no IDs to ground.
     from app.engine import brain
-    project = models.add_node("Website redesign", node_type="project")
-    child_a = models.add_node("Finish mockups for site")
-    child_b = models.add_node("Write copy for site")
-    done = models.add_node("Old completed step")
-    for child in (child_a, child_b, done):
-        models.add_edge(project, child, "is_part_of")
-    models.complete_nodes([done])
-
-    result = json.loads(execute_tool_call(fake_call("focus_lens", {"node_ids": [project]})))
-    assert set(result["focused_ids"]) == {project, child_a, child_b}
-    assert models.get_node(child_a)["focus_score"] == 10.0
-    assert models.get_node(done)["focus_score"] == 0.0
+    brain.reset_session()
+    models.add_node("Never-mentioned project", node_type="project")
+    result = json.loads(execute_tool_call(
+        fake_call("open_view", {"view": "project", "project_name": "never-mentioned project"}),
+        enforce_grounding=True))
+    assert result["success"]
     brain.reset_session()
 
 
@@ -250,7 +311,18 @@ def test_template_confirmation_routine_outcomes():
                          "changed": {"deadline": "2026-07-01", "priority": "high"}})
     ]) == "Updated **Order business cards** — now due 2026-07-01, high priority."
 
-    assert template_confirmation([("clear_focus", {"success": True})]) == "Lens cleared."
+    assert template_confirmation([
+        ("open_view", {"success": True, "view": "project", "project": "The Cage", "open_tasks": 11})
+    ]) == "Opened **The Cage** — 11 open tasks."
+    assert template_confirmation([
+        ("open_view", {"success": True, "view": "projects", "project_count": 9})
+    ]) == "Showing your **9 projects**."
+    assert template_confirmation([
+        ("open_view", {"success": True, "view": "list", "label": "errands", "shown": 4})
+    ]) == "Showing **errands** — 4 tasks."
+    assert template_confirmation([
+        ("open_view", {"success": True, "view": "today"})
+    ]) == "Here's your day."
 
 
 def test_template_confirmation_defers_nuanced_cases():

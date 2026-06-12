@@ -14,24 +14,21 @@ def test_existing_node_ids_filters_hallucinated_ids():
     assert models.existing_node_ids([real, 9999]) == [real]
 
 
-def test_complete_nodes_stamps_completed_at_and_clears_focus():
+def test_complete_nodes_stamps_completed_at():
     node_id = models.add_node("Finish thing")
-    models.set_focus([node_id])
     completed = models.complete_nodes([node_id, 4242])
     assert completed == [node_id]
     node = models.get_node(node_id)
     assert node["status"] == "completed"
     assert node["completed_at"] is not None
-    assert node["focus_score"] == 0.0
 
 
-def test_set_focus_replaces_previous_focus_set():
-    first = models.add_node("Old focus")
-    second = models.add_node("New focus")
-    models.set_focus([first])
-    models.set_focus([second])
-    assert models.get_node(first)["focus_score"] == 0.0
-    assert models.get_node(second)["focus_score"] == 10.0
+def test_app_state_roundtrip_and_overwrite():
+    assert models.get_state("view") is None
+    models.set_state("view", '{"mode": "today"}')
+    assert models.get_state("view") == '{"mode": "today"}'
+    models.set_state("view", '{"mode": "projects"}')
+    assert models.get_state("view") == '{"mode": "projects"}'
 
 
 def test_update_node_partial_fields():
