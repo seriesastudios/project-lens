@@ -337,7 +337,14 @@
             return div.innerHTML;
         };
 
-        // Append message to chat (escape first, then apply **bold** only)
+        // Escape first, then apply **bold** only — never raw HTML from the model.
+        const renderRich = (el, text) => {
+            el.innerHTML = escapeHtml(text).replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold">$1</strong>');
+        };
+
+        const scrollChat = () => { chatHistory.scrollTop = chatHistory.scrollHeight; };
+
+        // Append message to chat
         const appendMessage = (text, isUser = false) => {
             const wrapper = document.createElement('div');
             wrapper.className = `flex flex-col ${isUser ? 'items-end' : 'items-start'} gap-1 card-enter`;
@@ -347,29 +354,59 @@
             sender.innerText = isUser ? 'You' : 'Lens Brain';
 
             const bubble = document.createElement('div');
-            const parsedText = escapeHtml(text).replace(/\*\*(.*?)\*\*/g, '<strong class="font-bold">$1</strong>');
-
             if (isUser) {
                 bubble.className = 'px-5 py-3.5 bg-gray-900 text-white text-[15px] leading-relaxed rounded-2xl rounded-tr-sm max-w-[85%] shadow-md font-medium';
             } else {
                 bubble.className = 'px-5 py-3.5 bg-gray-50 border border-gray-100 text-gray-700 text-[15px] leading-relaxed rounded-2xl rounded-tl-sm max-w-[85%] shadow-sm';
             }
-            bubble.innerHTML = parsedText;
+            renderRich(bubble, text);
 
             wrapper.appendChild(sender);
             wrapper.appendChild(bubble);
             chatHistory.appendChild(wrapper);
-
-            // Scroll to bottom
-            chatHistory.scrollTop = chatHistory.scrollHeight;
+            scrollChat();
+            return bubble;
         };
 
-        // Send Chat Message via REST API
+        // A live assistant bubble that streaming events write into:
+        // [status placeholder] [confirmed actions] [streamed tokens]
+        const appendLiveBubble = () => {
+            const bubble = appendMessage('', false);
+            const statusEl = document.createElement('span');
+            statusEl.className = 'italic text-gray-400';
+            const actionsEl = document.createElement('span');
+            const streamEl = document.createElement('span');
+            bubble.replaceChildren(statusEl, actionsEl, streamEl);
+            return { bubble, statusEl, actionsEl, streamEl };
+        };
+
+        // Send chat message: POST /api/chat streams NDJSON events; the bubble
+        // fills in progressively (status → actions/tokens → final reply).
         const sendChatMessage = async (message) => {
             appendMessage(message, true);
 
             chatInput.disabled = true;
             sendBtn.innerHTML = `<svg class="w-5 h-5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path></svg>`;
+
+            const live = appendLiveBubble();
+            const handleEvent = (event) => {
+                if (event.type === 'status') {
+                    live.statusEl.textContent = event.text;
+                } else if (event.type === 'action') {
+                    live.statusEl.textContent = '';
+                    const piece = document.createElement('span');
+                    renderRich(piece, (live.actionsEl.childNodes.length ? ' ' : '') + event.text);
+                    live.actionsEl.appendChild(piece);
+                } else if (event.type === 'token') {
+                    live.statusEl.textContent = '';
+                    live.streamEl.textContent += event.text;
+                } else if (event.type === 'replace') {
+                    live.streamEl.textContent = event.text;
+                } else if (event.type === 'done') {
+                    renderRich(live.bubble, event.reply);  // authoritative final text
+                }
+                scrollChat();
+            };
 
             try {
                 const response = await fetch('/api/chat', {
@@ -377,11 +414,24 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ message })
                 });
+                if (!response.ok || !response.body) throw new Error(`HTTP ${response.status}`);
 
-                const data = await response.json();
-                appendMessage(data.reply, false);
+                const reader = response.body.getReader();
+                const decoder = new TextDecoder();
+                let buffer = '';
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    buffer += decoder.decode(value, { stream: true });
+                    let newline;
+                    while ((newline = buffer.indexOf('\n')) >= 0) {
+                        const line = buffer.slice(0, newline).trim();
+                        buffer = buffer.slice(newline + 1);
+                        if (line) handleEvent(JSON.parse(line));
+                    }
+                }
             } catch (err) {
-                appendMessage('**Error:** Connection to backend failed. Ensure `uvicorn app.main:app` is running.', false);
+                renderRich(live.bubble, '**Error:** Connection to backend failed. Ensure `uvicorn app.main:app` is running.');
                 console.error(err);
             } finally {
                 chatInput.disabled = false;

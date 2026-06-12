@@ -29,7 +29,7 @@ client = AsyncOpenAI(
 )
 
 MAX_TOOL_ROUNDS = 5
-HISTORY_TURNS = 12  # user+assistant messages kept as session memory (tokens are latency)
+HISTORY_TURNS = 8  # user+assistant messages kept as session memory (tokens are latency)
 
 # Small models occasionally write the tool call as prose ("open_view [{...}]")
 # instead of emitting a real one. LM Studio ignores tool_choice="required" and
@@ -774,86 +774,148 @@ def _node_content(node_id) -> str:
 _STATUS_PHRASES = {"on_hold": "on hold", "active": "active again", "cold_storage": "archived"}
 
 
+def _confirmation_sentences(name: str, result: dict) -> Optional[List[str]]:
+    """Sentences for ONE clean tool result. Returns None when the outcome needs
+    the model's judgment (errors, unknown IDs); [] when there is nothing to say
+    (searches). Streaming emits these per action as they execute."""
+    if "error" in result:
+        return None
+    sentences: List[str] = []
+
+    if name == "capture_tasks":
+        created = result.get("created", [])
+        if len(created) == 1:
+            item = created[0]
+            due = f" — due {item['deadline']}" if item.get("deadline") not in (None, "none") else ""
+            sentences.append(f"Captured **{item['content']}**{due}.")
+        elif created:
+            sentences.append(f"Captured {len(created)} tasks — they're in your Lens.")
+        skipped = result.get("skipped_duplicates", [])
+        if skipped:
+            sentences.append(f"({len(skipped)} already existed, not duplicated.)")
+
+    elif name == "complete_tasks":
+        if result.get("unknown_ids"):
+            return None  # the model should sort out what the user meant
+        ids = result.get("completed_ids", [])
+        if len(ids) == 1:
+            sentences.append(f"Checked off **{_node_content(ids[0])}**. ✓")
+        elif ids:
+            sentences.append(f"Checked off {len(ids)} tasks. ✓")
+
+    elif name == "update_task":
+        changed = result.get("changed", {})
+        content = _node_content(result["node_id"])
+        parts = []
+        if "deadline" in changed:
+            parts.append(f"now due {changed['deadline']}")
+        if "status" in changed:
+            parts.append(_STATUS_PHRASES.get(changed["status"], changed["status"]))
+        if "priority" in changed:
+            parts.append(f"{changed['priority']} priority")
+        detail = f" — {', '.join(parts)}" if parts else ""
+        sentences.append(f"Updated **{content}**{detail}.")
+
+    elif name == "link_tasks":
+        parent = _node_content(result["parent_id"])
+        child = _node_content(result["child_id"])
+        if result["relationship"] == "blocks":
+            sentences.append(f"Noted: **{parent}** blocks **{child}**.")
+        elif result["relationship"] == "is_part_of":
+            sentences.append(f"Filed **{child}** under **{parent}**.")
+        else:
+            sentences.append(f"Linked **{parent}** and **{child}**.")
+
+    elif name == "open_view":
+        view = result.get("view")
+        if view == "project":
+            count = result.get("open_tasks", 0)
+            plural = "task" if count == 1 else "tasks"
+            sentences.append(f"Opened **{result['project']}** — {count} open {plural}.")
+        elif view == "projects":
+            count = result.get("project_count", 0)
+            sentences.append(f"Showing your **{count} projects**.")
+        elif view == "list":
+            count = result.get("shown", 0)
+            plural = "task" if count == 1 else "tasks"
+            sentences.append(f"Showing **{result.get('label', 'selection')}** — {count} {plural}.")
+        else:
+            sentences.append("Here's your day.")
+
+    # search_tasks contributes no sentence; an action that followed it speaks
+    return sentences
+
+
 def template_confirmation(executed: List[tuple]) -> Optional[str]:
     """Builds the user-facing confirmation in code when every executed tool had a
     clean, routine outcome. Returns None when nuance is needed (errors, unknown
     IDs, search-only turns) — those fall back to an LLM wrap-up call."""
-    sentences = []
+    sentences: List[str] = []
     for name, result in executed:
-        if "error" in result:
+        per_result = _confirmation_sentences(name, result)
+        if per_result is None:
             return None
-
-        if name == "capture_tasks":
-            created = result.get("created", [])
-            if len(created) == 1:
-                item = created[0]
-                due = f" — due {item['deadline']}" if item.get("deadline") not in (None, "none") else ""
-                sentences.append(f"Captured **{item['content']}**{due}.")
-            elif created:
-                sentences.append(f"Captured {len(created)} tasks — they're in your Lens.")
-            skipped = result.get("skipped_duplicates", [])
-            if skipped:
-                sentences.append(f"({len(skipped)} already existed, not duplicated.)")
-
-        elif name == "complete_tasks":
-            if result.get("unknown_ids"):
-                return None  # the model should sort out what the user meant
-            ids = result.get("completed_ids", [])
-            if len(ids) == 1:
-                sentences.append(f"Checked off **{_node_content(ids[0])}**. ✓")
-            elif ids:
-                sentences.append(f"Checked off {len(ids)} tasks. ✓")
-
-        elif name == "update_task":
-            changed = result.get("changed", {})
-            content = _node_content(result["node_id"])
-            parts = []
-            if "deadline" in changed:
-                parts.append(f"now due {changed['deadline']}")
-            if "status" in changed:
-                parts.append(_STATUS_PHRASES.get(changed["status"], changed["status"]))
-            if "priority" in changed:
-                parts.append(f"{changed['priority']} priority")
-            detail = f" — {', '.join(parts)}" if parts else ""
-            sentences.append(f"Updated **{content}**{detail}.")
-
-        elif name == "link_tasks":
-            parent = _node_content(result["parent_id"])
-            child = _node_content(result["child_id"])
-            if result["relationship"] == "blocks":
-                sentences.append(f"Noted: **{parent}** blocks **{child}**.")
-            elif result["relationship"] == "is_part_of":
-                sentences.append(f"Filed **{child}** under **{parent}**.")
-            else:
-                sentences.append(f"Linked **{parent}** and **{child}**.")
-
-        elif name == "open_view":
-            view = result.get("view")
-            if view == "project":
-                count = result.get("open_tasks", 0)
-                plural = "task" if count == 1 else "tasks"
-                sentences.append(f"Opened **{result['project']}** — {count} open {plural}.")
-            elif view == "projects":
-                count = result.get("project_count", 0)
-                sentences.append(f"Showing your **{count} projects**.")
-            elif view == "list":
-                count = result.get("shown", 0)
-                plural = "task" if count == 1 else "tasks"
-                sentences.append(f"Showing **{result.get('label', 'selection')}** — {count} {plural}.")
-            else:
-                sentences.append("Here's your day.")
-
-        # search_tasks contributes no sentence; an action that followed it speaks
-
+        sentences.extend(per_result)
     return " ".join(sentences[:2]) if sentences else None
 
 
 # ---------------------------------------------------------------------------
-# Conversation loop
+# Conversation loop (streaming)
 # ---------------------------------------------------------------------------
+#
+# Event protocol (NDJSON over /api/chat):
+#   {"type": "status", "text": "Thinking…"}    transient placeholder
+#   {"type": "action", "text": "Captured…"}    a templated confirmation, as it happens
+#   {"type": "token",  "text": "The "}         streamed LLM reply text
+#   {"type": "replace","text": ""}             retract optimistically streamed text
+#   {"type": "lens"}                           internal: state changed, push to WS clients
+#   {"type": "done",   "reply": "…"}           authoritative final reply
 
-async def process_user_input(user_text: str) -> str:
-    """Runs the tool-calling loop and returns the assistant's reply text."""
+class _StreamedCall:
+    """A tool call reassembled from streaming deltas (same shape execute_tool_call expects)."""
+    def __init__(self, call_id: str, name: str, arguments: str):
+        self.id = call_id
+        self.type = "function"
+        self.function = _SalvagedFunction(name, arguments)
+
+
+async def _collect_stream(stream, sink: List[str]):
+    """Consumes a streaming completion. Yields ("token", text, None) for content
+    deltas that arrive BEFORE any tool-call delta (also appended to sink so the
+    caller knows what was shown), then one ("final", content, tool_calls).
+    The caller decides whether forwarded tokens stand or get retracted."""
+    content_parts: List[str] = []
+    slots: dict = {}
+    saw_tool_delta = False
+    async for chunk in stream:
+        if not chunk.choices:
+            continue
+        delta = chunk.choices[0].delta
+        if delta is None:
+            continue
+        for tc in (delta.tool_calls or []):
+            saw_tool_delta = True
+            slot = slots.setdefault(tc.index, {"id": tc.id or f"stream_{tc.index}",
+                                               "name": "", "arguments": ""})
+            if tc.id:
+                slot["id"] = tc.id
+            if tc.function and tc.function.name:
+                slot["name"] += tc.function.name
+            if tc.function and tc.function.arguments:
+                slot["arguments"] += tc.function.arguments
+        if delta.content:
+            content_parts.append(delta.content)
+            if not saw_tool_delta:
+                sink.append(delta.content)
+                yield ("token", delta.content, None)
+    calls = [_StreamedCall(s["id"], s["name"], s["arguments"])
+             for _, s in sorted(slots.items()) if s["name"]]
+    yield ("final", "".join(content_parts), calls)
+
+
+async def process_user_input_events(user_text: str):
+    """Runs the tool-calling loop, yielding protocol events as the turn unfolds.
+    The 'done' event always arrives last and carries the full reply text."""
     messages: List[Any] = [
         {"role": "system", "content": SYSTEM_PROMPT_TEMPLATE},   # static — cacheable prefix
         {"role": "system", "content": format_context_prompt(user_text)},  # volatile
@@ -865,30 +927,44 @@ async def process_user_input(user_text: str) -> str:
     ran_tools = False
     salvage_attempted = False
     executed: List[tuple] = []  # (tool_name, parsed_result) for templated confirmations
+    streamed_reply = ""         # stage-1 tokens already shown to the user
+
+    yield {"type": "status", "text": "Thinking…"}
 
     # Stage 1 — decide and act. The decision prompt carries no style rules, so a
     # small model doesn't skip the tool call and jump straight to a styled reply.
     for _ in range(MAX_TOOL_ROUNDS):
+        content = ""
+        tool_calls: List[Any] = []
+        forwarded: List[str] = []
         try:
-            response = await client.chat.completions.create(
+            stream = await client.chat.completions.create(
                 model=config.AI_MODEL_NAME,
                 messages=messages,
                 tools=LENS_TOOLS,
                 tool_choice="auto",
                 temperature=0.2,  # small models drift into skipping tool calls at higher temps
+                stream=True,
             )
+            async for kind, first, second in _collect_stream(stream, forwarded):
+                if kind == "token":
+                    # Optimistic: most no-tool responses are the actual reply.
+                    yield {"type": "token", "text": first}
+                else:
+                    content, tool_calls = first, list(second or [])
         except Exception as exc:
-            return f"Warning: inference engine unreachable — is LM Studio running with {config.AI_MODEL_NAME} loaded? Details: {exc}"
-
-        message = response.choices[0].message
-
-        tool_calls: List[Any] = list(message.tool_calls or [])
+            reply = (f"Warning: inference engine unreachable — is LM Studio running "
+                     f"with {config.AI_MODEL_NAME} loaded? Details: {exc}")
+            break
+        streamed_reply = "".join(forwarded)
 
         if not tool_calls:
-            content = message.content or ""
             salvaged = None
             if not salvage_attempted and TOOL_NAME_LEAK.search(content):
                 salvage_attempted = True
+                if streamed_reply:  # what we streamed was a leaked call, not a reply
+                    yield {"type": "replace", "text": ""}
+                    streamed_reply = ""
                 salvaged = salvage_tool_call(content)
                 if salvaged is None:
                     # Leak detected but unparseable ("open_view with the errand
@@ -905,32 +981,42 @@ async def process_user_input(user_text: str) -> str:
                 break
             # The model wrote the call as prose; execute the parsed equivalent.
             tool_calls = [salvaged]
-            messages.append({
-                "role": "assistant",
-                "content": None,
-                "tool_calls": [{
-                    "id": salvaged.id,
-                    "type": "function",
-                    "function": {"name": salvaged.function.name,
-                                 "arguments": salvaged.function.arguments},
-                }],
-            })
-        else:
-            messages.append(message)
+
+        if streamed_reply and tool_calls:
+            # Content preceding a real tool call is reasoning spill, not a reply.
+            yield {"type": "replace", "text": ""}
+            streamed_reply = ""
+        messages.append({
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{
+                "id": call.id,
+                "type": "function",
+                "function": {"name": call.function.name,
+                             "arguments": call.function.arguments},
+            } for call in tool_calls],
+        })
 
         ran_tools = True
         round_results = []
         for raw_call in tool_calls:
             tool_call: Any = raw_call
             result_json = execute_tool_call(tool_call, enforce_grounding=True)
-            round_results.append((tool_call.function.name, json.loads(result_json)))
+            result = json.loads(result_json)
+            round_results.append((tool_call.function.name, result))
             messages.append({
                 "role": "tool",
                 "tool_call_id": tool_call.id,
                 "name": tool_call.function.name,
                 "content": result_json,
             })
+            for sentence in (_confirmation_sentences(tool_call.function.name, result) or []):
+                yield {"type": "action", "text": sentence}
         executed.extend(round_results)
+
+        if any(name != "search_tasks" and "error" not in result
+               for name, result in round_results):
+            yield {"type": "lens"}  # something changed — update the cards now
 
         # A clean round of pure actions is finished — don't spend another LLM
         # call asking the model whether it's done. Searches and errors continue
@@ -938,6 +1024,8 @@ async def process_user_input(user_text: str) -> str:
         if all(name != "search_tasks" and "error" not in result
                for name, result in round_results):
             break
+        if round_results and all(name == "search_tasks" for name, _ in round_results):
+            yield {"type": "status", "text": "Searching your tasks…"}
 
     # Stage 2 — speak. Routine outcomes are confirmed from code (no second
     # LLM call — this roughly halves actioned-turn latency); anything nuanced
@@ -945,19 +1033,36 @@ async def process_user_input(user_text: str) -> str:
     if reply is None and ran_tools:
         reply = template_confirmation(executed)
 
-    if reply is None:
+    if reply is None and not streamed_reply:
         messages.append({"role": "system", "content": POST_TOOL_REMINDER})
         try:
-            final = await client.chat.completions.create(
-                model=config.AI_MODEL_NAME, messages=messages, temperature=0.2)
-            reply = final.choices[0].message.content
+            stream = await client.chat.completions.create(
+                model=config.AI_MODEL_NAME, messages=messages,
+                temperature=0.2, stream=True)
+            forwarded = []
+            async for kind, first, _second in _collect_stream(stream, forwarded):
+                if kind == "token":
+                    yield {"type": "token", "text": first}
+                else:
+                    reply = first
         except Exception as exc:
             reply = f"Done, but I couldn't generate a summary. Details: {exc}"
+    elif reply is None:
+        reply = streamed_reply  # the streamed stage-1 text was the reply
 
     reply = reply or "Done."
     conversation_history.append({"role": "assistant", "content": reply})
     if ran_tools:
         models.add_digest("activity_log", f"User: {user_text}\nLens-Brain: {reply}")
+    yield {"type": "done", "reply": reply}
+
+
+async def process_user_input(user_text: str) -> str:
+    """Non-streaming wrapper: drains the event stream and returns the final reply."""
+    reply = "Done."
+    async for event in process_user_input_events(user_text):
+        if event["type"] == "done":
+            reply = event["reply"]
     return reply
 
 

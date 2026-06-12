@@ -1,13 +1,14 @@
+import asyncio
 import json
 from contextlib import asynccontextmanager
 from typing import List
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.engine import embeddings, views
-from app.engine.brain import process_user_input
+from app.engine.brain import process_user_input_events
 from app.database import models
 
 
@@ -66,16 +67,38 @@ class ChatRequest(BaseModel):
     message: str
 
 
-class ChatResponse(BaseModel):
-    reply: str
-
-
-@app.post("/api/chat", response_model=ChatResponse)
+@app.post("/api/chat")
 async def chat_endpoint(request: ChatRequest):
-    """Routes user text through the brain, then pushes the new lens state to all clients."""
-    reply_text = await process_user_input(request.message)
-    await manager.broadcast_state()
-    return ChatResponse(reply=reply_text)
+    """Routes user text through the brain, streaming protocol events back as
+    NDJSON. The turn runs in its own task so a client disconnect mid-stream
+    can't abort half-finished database work; 'lens' events become WebSocket
+    state pushes (cards update while the reply is still streaming)."""
+    queue: asyncio.Queue = asyncio.Queue()
+
+    async def run_turn():
+        try:
+            async for event in process_user_input_events(request.message):
+                if event["type"] == "lens":
+                    await manager.broadcast_state()
+                else:
+                    await queue.put(event)
+        except Exception as exc:
+            await queue.put({"type": "done", "reply": f"Something went wrong: {exc}"})
+        finally:
+            await manager.broadcast_state()  # covers view fallbacks and stragglers
+            await queue.put(None)
+
+    task = asyncio.create_task(run_turn())
+
+    async def event_stream():
+        while True:
+            event = await queue.get()
+            if event is None:
+                break
+            yield json.dumps(event) + "\n"
+        await task
+
+    return StreamingResponse(event_stream(), media_type="application/x-ndjson")
 
 
 @app.post("/api/nodes/{node_id}/complete")
