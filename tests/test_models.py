@@ -23,6 +23,30 @@ def test_complete_nodes_stamps_completed_at():
     assert node["completed_at"] is not None
 
 
+def test_description_roundtrip_and_partial_update():
+    node_id = models.add_node("Lock credits in offline edit",
+                              description="UHD page roll from Poncho, no stage-hour fixes")
+    assert models.get_node(node_id)["description"] == "UHD page roll from Poncho, no stage-hour fixes"
+    # updating other fields leaves the description intact
+    models.update_node(node_id, priority="high")
+    assert models.get_node(node_id)["description"] == "UHD page roll from Poncho, no stage-hour fixes"
+    # and it can be replaced on its own
+    models.update_node(node_id, description="new note")
+    node = models.get_node(node_id)
+    assert node["description"] == "new note" and node["content"] == "Lock credits in offline edit"
+
+
+def test_multi_home_task_has_two_parents():
+    cage = models.add_node("The Cage", node_type="project")
+    ethics = models.add_node("AI Ethics Brand", node_type="project")
+    op_ed = models.add_node("Draft Globe & Mail op-ed")
+    models.add_edge(cage, op_ed, "is_part_of")
+    models.add_edge(ethics, op_ed, "is_part_of")
+    # the task is an active child of BOTH projects
+    assert op_ed in models.get_active_child_ids(cage)
+    assert op_ed in models.get_active_child_ids(ethics)
+
+
 def test_app_state_roundtrip_and_overwrite():
     assert models.get_state("view") is None
     models.set_state("view", '{"mode": "today"}')

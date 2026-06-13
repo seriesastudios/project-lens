@@ -226,6 +226,36 @@ def test_annotate_adds_project_names():
     assert card["project_open_total"] == 1
 
 
+def test_multi_home_task_appears_in_both_project_details():
+    nodes = [
+        make_node(1, "The Cage", node_type="project"),
+        make_node(2, "AI Ethics Brand", node_type="project"),
+        make_node(3, "Draft Globe op-ed"),
+    ]
+    # filed under The Cage FIRST, then AI Ethics Brand
+    edges = [
+        {"parent_id": 1, "child_id": 3, "relationship": "is_part_of"},
+        {"parent_id": 2, "child_id": 3, "relationship": "is_part_of"},
+    ]
+    assert [c["id"] for c in scoring.compute_project_detail(nodes, edges, 1)] == [3]
+    assert [c["id"] for c in scoring.compute_project_detail(nodes, edges, 2)] == [3]
+
+
+def test_multi_home_primary_project_is_first_assigned():
+    from app.database import models
+    cage = models.add_node("The Cage", node_type="project")
+    ethics = models.add_node("AI Ethics Brand", node_type="project")
+    op_ed = models.add_node("Draft Globe op-ed", target_date=datetime.now().date().isoformat())
+    models.add_edge(cage, op_ed, "is_part_of")     # first → primary
+    models.add_edge(ethics, op_ed, "is_part_of")
+
+    nodes = models.get_active_nodes()
+    edges = models.get_all_edges()
+    cards = scoring.annotate_projects(scoring.compute_today(nodes, edges), nodes, edges)
+    card = next(c for c in cards if c["id"] == op_ed)
+    assert card["project_name"] == "The Cage"  # first-assigned wins, not last
+
+
 def test_project_card_suppressed_when_its_tasks_are_visible():
     from app.database import models
     project = models.add_node("Visible Project", node_type="project",

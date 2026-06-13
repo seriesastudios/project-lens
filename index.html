@@ -168,10 +168,6 @@
             const el = document.createElement('div');
             el.className = `card-enter border rounded-[1.25rem] p-5 transition-all duration-300 hover:scale-[1.01] hover:shadow-md ${colorClass} ${priorityClasses(node)}`;
             el.style.animationDelay = `${index * 0.05}s`;
-            if (clickable) {
-                el.classList.add('cursor-pointer');
-                el.addEventListener('click', () => enterNode(node));
-            }
 
             const row = document.createElement('div');
             row.className = 'flex items-start justify-between gap-4';
@@ -222,11 +218,34 @@
                 doneBtn.className = 'h-6 w-6 rounded-full border border-current opacity-30 hover:opacity-100 hover:bg-black/5 transition-all flex items-center justify-center';
                 doneBtn.title = 'Mark complete';
                 doneBtn.innerHTML = '<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"></path></svg>';
-                doneBtn.addEventListener('click', () => completeNode(node.id));
+                doneBtn.addEventListener('click', (e) => { e.stopPropagation(); completeNode(node.id); });
                 actions.appendChild(doneBtn);
                 row.appendChild(actions);
             }
             el.appendChild(row);
+
+            // Click behavior: project cards navigate; task cards with a
+            // description expand it inline (click again to collapse).
+            if (clickable && isProject) {
+                el.classList.add('cursor-pointer');
+                el.addEventListener('click', () => enterNode(node));
+            } else if (!isProject && node.description) {
+                el.classList.add('cursor-pointer');
+                const caret = document.createElement('span');
+                caret.className = 'text-current opacity-40 ml-1.5 text-xs align-middle';
+                caret.textContent = '▾';
+                title.appendChild(caret);
+
+                const desc = document.createElement('p');
+                desc.className = 'hidden text-[13px] leading-relaxed opacity-80 mt-3 pt-3 border-t border-current/10 whitespace-pre-wrap';
+                desc.textContent = node.description;
+                el.appendChild(desc);
+
+                el.addEventListener('click', () => {
+                    const open = desc.classList.toggle('hidden') === false;
+                    caret.textContent = open ? '▴' : '▾';
+                });
+            }
             return el;
         };
 

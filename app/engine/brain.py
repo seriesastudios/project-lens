@@ -407,6 +407,7 @@ class UpdateTaskArgs(BaseModel):
     deadline: Optional[str] = None
     status: Optional[str] = None
     priority: Optional[str] = None
+    description: Optional[str] = None
 
     @field_validator("priority")
     @classmethod
@@ -523,7 +524,8 @@ LENS_TOOLS: Any = [
                     "content": {"type": "string", "description": "New wording, if rewording."},
                     "deadline": {"type": "string", "description": "New deadline, as the user said it ('next Monday') or YYYY-MM-DD."},
                     "status": {"type": "string", "enum": ["active", "on_hold", "cold_storage"], "description": "New status (use complete_tasks for completion)."},
-                    "priority": {"type": "string", "enum": ["high", "normal", "low"], "description": "New importance level, when the user raises or lowers it."}
+                    "priority": {"type": "string", "enum": ["high", "normal", "low"], "description": "New importance level, when the user raises or lowers it."},
+                    "description": {"type": "string", "description": "Longer detail/notes for the task, when the user dictates context to attach. Use their words; never invent."}
                 },
                 "required": ["node_id"]
             }
@@ -645,11 +647,13 @@ def _execute_update(args: UpdateTaskArgs) -> dict:
     if not models.existing_node_ids([args.node_id]):
         return {"error": f"Task {args.node_id} does not exist. Use an ID from the active task list."}
     models.update_node(args.node_id, content=args.content, status=args.status,
-                       target_date=args.deadline, priority=args.priority)
+                       target_date=args.deadline, priority=args.priority,
+                       description=args.description)
     if args.content is not None:
         embeddings.index_node(args.node_id, args.content)
     changed = {k: v for k, v in (("content", args.content), ("status", args.status),
-                                 ("deadline", args.deadline), ("priority", args.priority))
+                                 ("deadline", args.deadline), ("priority", args.priority),
+                                 ("description", args.description))
                if v is not None}
     return {"success": True, "node_id": args.node_id, "changed": changed}
 

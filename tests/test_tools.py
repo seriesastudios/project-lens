@@ -294,6 +294,15 @@ def test_capture_and_update_priority():
     assert "error" in result
 
 
+def test_update_task_attaches_description():
+    node_id = models.add_node("Lock credits in offline edit")
+    result = json.loads(execute_tool_call(fake_call("update_task", {
+        "node_id": node_id, "description": "UHD page roll from Poncho, no stage-hour fixes"
+    })))
+    assert result["changed"] == {"description": "UHD page roll from Poncho, no stage-hour fixes"}
+    assert models.get_node(node_id)["description"] == "UHD page roll from Poncho, no stage-hour fixes"
+
+
 def test_template_confirmation_routine_outcomes():
     from app.engine.brain import template_confirmation
     node_id = models.add_node("Order business cards")

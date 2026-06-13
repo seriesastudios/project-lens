@@ -43,6 +43,7 @@ _MIGRATION_COLUMNS = [
     ("completed_at", "DATETIME NULL"),
     ("updated_at", "DATETIME NULL"),
     ("priority", "TEXT DEFAULT 'normal'"),
+    ("description", "TEXT NULL"),  # longer detail shown when a card is expanded
 ]
 
 
@@ -133,12 +134,14 @@ def init_db():
 
 
 def add_node(content: str, status: str = 'active', target_date: Optional[str] = None,
-             node_type: str = 'task', priority: str = 'normal') -> int:
+             node_type: str = 'task', priority: str = 'normal',
+             description: Optional[str] = None) -> int:
     with DatabaseSession() as conn:
         cursor = conn.cursor()
         cursor.execute(
-            "INSERT INTO nodes (content, status, target_date, node_type, priority) VALUES (?, ?, ?, ?, ?)",
-            (content, status, target_date, node_type, priority)
+            "INSERT INTO nodes (content, status, target_date, node_type, priority, description) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            (content, status, target_date, node_type, priority, description)
         )
         assert cursor.lastrowid is not None
         return cursor.lastrowid
@@ -181,12 +184,16 @@ def find_node_by_content(content: str, node_type: Optional[str] = None) -> Optio
 
 
 def update_node(node_id: int, content: Optional[str] = None, status: Optional[str] = None,
-                target_date: Optional[str] = None, priority: Optional[str] = None) -> bool:
+                target_date: Optional[str] = None, priority: Optional[str] = None,
+                description: Optional[str] = None) -> bool:
     """Partial update; stamps updated_at, and completed_at when completing. Returns False if node missing."""
     fields, params = [], []
     if content is not None:
         fields.append("content = ?")
         params.append(content)
+    if description is not None:
+        fields.append("description = ?")
+        params.append(description)
     if priority is not None:
         fields.append("priority = ?")
         params.append(priority)
@@ -282,8 +289,10 @@ def search_active_nodes(text: str, limit: int = 15) -> List[Dict[str, Any]]:
 
 
 def get_all_edges() -> List[Dict[str, Any]]:
+    # Ordered by insertion (rowid) so "first is_part_of edge = primary project"
+    # is deterministic for multi-home tasks.
     with DatabaseSession() as conn:
-        return [dict(row) for row in conn.execute("SELECT * FROM edges").fetchall()]
+        return [dict(row) for row in conn.execute("SELECT * FROM edges ORDER BY rowid").fetchall()]
 
 
 def get_active_child_ids(parent_id: int, relationship: str = "is_part_of") -> List[int]:

@@ -2,5 +2,6 @@ venv/
 __pycache__/
 *.pyc
 lens.db
+lens.db.backup-*
 .env
 .pytest_cache/

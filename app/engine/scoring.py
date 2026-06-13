@@ -268,13 +268,16 @@ def annotate_projects(cards: List[Dict[str, Any]], nodes: List[Dict[str, Any]],
     by_id = {n["id"]: n for n in nodes}
     project_of: Dict[int, Dict[str, Any]] = {}
     open_count: Dict[int, int] = {}
-    for edge in edges:
+    for edge in edges:  # edges arrive in insertion order (models.get_all_edges)
         if edge["relationship"] != "is_part_of":
             continue
         parent = by_id.get(edge["parent_id"])
         child = by_id.get(edge["child_id"])
         if parent and child and parent.get("node_type") == "project":
-            project_of[child["id"]] = parent
+            # A task may belong to several projects (multi-home); the FIRST one
+            # it was filed under is its primary home for grouping/the chip.
+            if child["id"] not in project_of:
+                project_of[child["id"]] = parent
             open_count[parent["id"]] = open_count.get(parent["id"], 0) + 1
 
     for card in cards:
