@@ -310,6 +310,69 @@ def test_capture_subtasks_under_an_existing_task():
     assert contents == {"Lock credits", "Foley check"}
 
 
+def test_update_task_promotes_task_to_project_and_detaches():
+    # "make X its own project" flips node_type AND removes the is_part_of edge
+    # filing it under its old project; its own subtasks stay attached.
+    project = models.add_node("New Scripts", node_type="project")
+    wayfinder = models.add_node("Wayfinder")
+    sub = models.add_node("Existing beat sheet")
+    models.add_edge(project, wayfinder, "is_part_of")
+    models.add_edge(wayfinder, sub, "is_part_of")
+
+    result = json.loads(execute_tool_call(fake_call("update_task", {
+        "node_id": wayfinder, "node_type": "project"
+    })))
+    assert result["success"]
+    assert result["changed"]["node_type"] == "project"
+    assert result["detached"] == 1
+
+    assert models.get_node(wayfinder)["node_type"] == "project"
+    # detached from New Scripts, but keeps its own child
+    parent_ids = {e["parent_id"] for e in models.get_edges_for_node(wayfinder)
+                  if e["child_id"] == wayfinder}
+    assert project not in parent_ids
+    assert models.get_active_child_ids(wayfinder) == [sub]
+
+    # the confirmation reads as a promotion
+    from app.engine.brain import template_confirmation
+    assert template_confirmation([("update_task", result)]) == \
+        "Promoted **Wayfinder** to its own project."
+
+
+def test_promote_then_capture_new_tasks_under_it():
+    # full sequence: promote an existing task, then file new tasks under it.
+    project = models.add_node("New Scripts", node_type="project")
+    wayfinder = models.add_node("Wayfinder")
+    models.add_edge(project, wayfinder, "is_part_of")
+
+    json.loads(execute_tool_call(fake_call("update_task", {
+        "node_id": wayfinder, "node_type": "project"
+    })))
+    result = json.loads(execute_tool_call(fake_call("capture_tasks", {
+        "tasks": [
+            {"content": "Write logline", "parent_id": wayfinder},
+            {"content": "Draft treatment", "parent_id": wayfinder},
+            {"content": "Build pitch deck", "parent_id": wayfinder},
+        ]
+    })))
+    assert result["success"]
+    assert len(models.get_active_child_ids(wayfinder)) == 3
+
+    # it now appears in the all-projects overview
+    from app.engine import scoring
+    overview = scoring.compute_projects_overview(
+        models.get_active_nodes(), models.get_all_edges())
+    assert wayfinder in {c["id"] for c in overview}
+
+
+def test_update_task_rejects_bad_node_type():
+    node_id = models.add_node("Some task")
+    result = json.loads(execute_tool_call(fake_call("update_task", {
+        "node_id": node_id, "node_type": "epic"
+    })))
+    assert "error" in result
+
+
 def test_update_task_attaches_description():
     node_id = models.add_node("Lock credits in offline edit")
     result = json.loads(execute_tool_call(fake_call("update_task", {

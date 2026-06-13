@@ -77,3 +77,28 @@ def test_find_node_by_content():
     models.add_node("Lens MVP", node_type="project")
     assert models.find_node_by_content("Lens MVP", node_type="project") is not None
     assert models.find_node_by_content("Lens MVP", node_type="task") is None
+
+
+def test_update_node_changes_node_type():
+    node_id = models.add_node("Wayfinder")
+    assert models.get_node(node_id)["node_type"] == "task"
+    assert models.update_node(node_id, node_type="project")
+    assert models.get_node(node_id)["node_type"] == "project"
+
+
+def test_detach_parents_removes_only_is_part_of_edges():
+    project = models.add_node("New Scripts", node_type="project")
+    wayfinder = models.add_node("Wayfinder")
+    blocker = models.add_node("Some blocker")
+    child = models.add_node("A subtask")
+    models.add_edge(project, wayfinder, "is_part_of")   # parent link to drop
+    models.add_edge(blocker, wayfinder, "blocks")       # different relationship: keep
+    models.add_edge(wayfinder, child, "is_part_of")     # wayfinder as PARENT: keep
+
+    removed = models.detach_parents(wayfinder)
+    assert removed == 1
+    remaining = models.get_edges_for_node(wayfinder)
+    rels = {(e["parent_id"], e["child_id"], e["relationship"]) for e in remaining}
+    assert (project, wayfinder, "is_part_of") not in rels
+    assert (blocker, wayfinder, "blocks") in rels
+    assert (wayfinder, child, "is_part_of") in rels

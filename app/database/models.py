@@ -155,6 +155,17 @@ def add_edge(parent_id: int, child_id: int, relationship: str):
         )
 
 
+def detach_parents(child_id: int, relationship: str = "is_part_of") -> int:
+    """Remove all edges that file `child_id` under a parent (used when a task is
+    promoted to a top-level project). Returns the number of edges deleted."""
+    with DatabaseSession() as conn:
+        cursor = conn.execute(
+            "DELETE FROM edges WHERE child_id = ? AND relationship = ?",
+            (child_id, relationship)
+        )
+        return cursor.rowcount
+
+
 def get_node(node_id: int) -> Optional[Dict[str, Any]]:
     with DatabaseSession() as conn:
         row = conn.execute("SELECT * FROM nodes WHERE id = ?", (node_id,)).fetchone()
@@ -185,7 +196,7 @@ def find_node_by_content(content: str, node_type: Optional[str] = None) -> Optio
 
 def update_node(node_id: int, content: Optional[str] = None, status: Optional[str] = None,
                 target_date: Optional[str] = None, priority: Optional[str] = None,
-                description: Optional[str] = None) -> bool:
+                description: Optional[str] = None, node_type: Optional[str] = None) -> bool:
     """Partial update; stamps updated_at, and completed_at when completing. Returns False if node missing."""
     fields, params = [], []
     if content is not None:
@@ -194,6 +205,9 @@ def update_node(node_id: int, content: Optional[str] = None, status: Optional[st
     if description is not None:
         fields.append("description = ?")
         params.append(description)
+    if node_type is not None:
+        fields.append("node_type = ?")
+        params.append(node_type)
     if priority is not None:
         fields.append("priority = ?")
         params.append(priority)

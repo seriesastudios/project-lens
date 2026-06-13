@@ -122,6 +122,19 @@ def build_cases(ids):
         mutating = [t for t, _ in calls if t != "search_tasks"]
         return True if not mutating else f"expected no action, got {mutating}"
 
+    def expect_promote_with_tasks(calls, text):
+        # two-step: flip landing page to a project AND file the named tasks under it
+        promoted = [a for t, a in calls if t == "update_task"
+                    and a.get("node_id") == ids["landing"] and a.get("node_type") == "project"]
+        if not promoted:
+            return f"no update_task promoting landing to project; got {[(t, a) for t, a in calls]}"
+        filed = [a for t, a in calls if t == "capture_tasks"
+                 and a.get("tasks") and all(task.get("parent_id") == ids["landing"]
+                                            for task in a["tasks"])]
+        if not filed:
+            return "promoted, but new tasks not captured under the landing page"
+        return True
+
     return [
         ("capture single + deadline", "I need to renew my passport before my Japan trip in September",
          expect_tool("capture_tasks", lambda a: True if a["tasks"] and a["tasks"][0].get("deadline") else "missing deadline")),
@@ -141,6 +154,8 @@ def build_cases(ids):
          expect_tool("update_task", lambda a: True if a["node_id"] == ids["dentist"] and a.get("deadline") == "2026-07-03" else f"args {a}")),
         ("pause task", "put the landing page on hold for now",
          expect_tool("update_task", lambda a: True if a["node_id"] == ids["landing"] and a.get("status") == "on_hold" else f"args {a}")),
+        ("promote task to project with tasks", "I want the landing page to be its own project with tasks: write the copy, choose a template, and add a contact form",
+         expect_promote_with_tasks),
         ("dependency", "buying groceries is blocked by sending the invoices",
          expect_tool("link_tasks", lambda a: True if a["relationship"] == "blocks" and a["parent_id"] == ids["invoices"] else f"args {a}")),
         ("focus project opens project view", "let's focus on the website redesign",

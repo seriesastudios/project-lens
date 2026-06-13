@@ -158,7 +158,7 @@ RULES
 1. The user mentions new work, a goal, or a commitment → call capture_tasks with EVERY distinct task in the message. A project with steps → one item with node_type "project" and the steps in subtasks. Set parent_id when it clearly belongs to an existing item — parent_id may be ANY existing task, not just a project, so "add X and Y under <task>" or "as subtasks of <task>" files them as that task's subtasks. If they signal importance about the NEW work ("critical", "really important", "must do") set priority "high" on it ("no rush"/"whenever" → "low") — still capture_tasks, never update_task. Never capture anything already in ACTIVE TASKS.
 2. Deadlines: pass the deadline exactly as the user said it ("Friday", "end of month", "June 3") or as YYYY-MM-DD — the system converts relative dates itself. No date stated or implied → omit the field, never invent one.
 3. The user finished something → call complete_tasks with ALL matching IDs from ACTIVE TASKS, in one call. Match loosely: "sent the invoices" matches "Send invoices to clients". Never create a task for finished work; if nothing matches, ask one short question.
-4. Reword, change deadline, change importance, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change. update_task is for tasks that ALREADY EXIST in ACTIVE TASKS. Importance words about an existing task ("X is critical" → priority high; "X is low priority, no rush" → low). Set priority ONLY when the user signals it — never infer it.
+4. Reword, change deadline, change importance, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change. update_task is for tasks that ALREADY EXIST in ACTIVE TASKS. Importance words about an existing task ("X is critical" → priority high; "X is low priority, no rush" → low). Set priority ONLY when the user signals it — never infer it. PROMOTE an existing task to a project ("make X its own project", "I want X to be its own project with A, B, C", "turn X into a project") → in the SAME turn: (1) call update_task on X with node_type "project"; (2) if they name new tasks A, B, C, call capture_tasks for them with parent_id = X's id. If X isn't in ACTIVE TASKS, search_tasks for it first.
 5. A dependency or grouping is stated → call link_tasks. The BLOCKER is always parent_id: "X blocks Y" → X is parent_id; "Y is blocked by X" → X is still parent_id. Use is_part_of for project/subtask grouping.
 6. ANY request to see tasks is NAVIGATION — call open_view, never answer with a text list:
    - "focus on X" / "let's work on X" / "open X" / "what's left on X" / "where am I on X" → open_view {"view": "project", "project_name": "X"}. Pass the project's name as the user said it — the system finds the project and shows ALL its open tasks itself. Do NOT pass node_ids and do NOT search first.
@@ -408,6 +408,14 @@ class UpdateTaskArgs(BaseModel):
     status: Optional[str] = None
     priority: Optional[str] = None
     description: Optional[str] = None
+    node_type: Optional[str] = None
+
+    @field_validator("node_type")
+    @classmethod
+    def check_node_type(cls, value):
+        if value is not None and value not in models.VALID_NODE_TYPES:
+            raise ValueError(f"node_type must be one of {models.VALID_NODE_TYPES}")
+        return value
 
     @field_validator("priority")
     @classmethod
@@ -516,7 +524,7 @@ LENS_TOOLS: Any = [
         "type": "function",
         "function": {
             "name": "update_task",
-            "description": "Edit an existing task: reword it, change/set its deadline, or change its status (active, on_hold, cold_storage). Only pass the fields that change.",
+            "description": "Edit an existing task: reword it, change/set its deadline, change its status (active, on_hold, cold_storage), or promote it to a project (node_type 'project'). Only pass the fields that change.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -525,7 +533,8 @@ LENS_TOOLS: Any = [
                     "deadline": {"type": "string", "description": "New deadline, as the user said it ('next Monday') or YYYY-MM-DD."},
                     "status": {"type": "string", "enum": ["active", "on_hold", "cold_storage"], "description": "New status (use complete_tasks for completion)."},
                     "priority": {"type": "string", "enum": ["high", "normal", "low"], "description": "New importance level, when the user raises or lowers it."},
-                    "description": {"type": "string", "description": "Longer detail/notes for the task, when the user dictates context to attach. Use their words; never invent."}
+                    "description": {"type": "string", "description": "Longer detail/notes for the task, when the user dictates context to attach. Use their words; never invent."},
+                    "node_type": {"type": "string", "enum": ["task", "project"], "description": "Set 'project' to promote a task into a top-level project (it detaches from any parent project and its subtasks become the project's tasks)."}
                 },
                 "required": ["node_id"]
             }
@@ -648,14 +657,20 @@ def _execute_update(args: UpdateTaskArgs) -> dict:
         return {"error": f"Task {args.node_id} does not exist. Use an ID from the active task list."}
     models.update_node(args.node_id, content=args.content, status=args.status,
                        target_date=args.deadline, priority=args.priority,
-                       description=args.description)
+                       description=args.description, node_type=args.node_type)
     if args.content is not None:
         embeddings.index_node(args.node_id, args.content)
+    result: dict = {"success": True, "node_id": args.node_id}
+    # Promoting to a project makes the node top-level: drop the is_part_of edges
+    # that filed it under its old project(s); its own subtasks come along.
+    if args.node_type == "project":
+        result["detached"] = models.detach_parents(args.node_id)
     changed = {k: v for k, v in (("content", args.content), ("status", args.status),
                                  ("deadline", args.deadline), ("priority", args.priority),
-                                 ("description", args.description))
+                                 ("description", args.description), ("node_type", args.node_type))
                if v is not None}
-    return {"success": True, "node_id": args.node_id, "changed": changed}
+    result["changed"] = changed
+    return result
 
 
 def _execute_link(args: LinkTasksArgs) -> dict:
@@ -832,6 +847,9 @@ def _confirmation_sentences(name: str, result: dict) -> Optional[List[str]]:
     elif name == "update_task":
         changed = result.get("changed", {})
         content = _node_content(result["node_id"])
+        if changed.get("node_type") == "project":
+            sentences.append(f"Promoted **{content}** to its own project.")
+            return sentences
         parts = []
         if "deadline" in changed:
             parts.append(f"now due {changed['deadline']}")
