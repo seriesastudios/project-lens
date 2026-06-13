@@ -40,7 +40,7 @@ HISTORY_MAX = 16
 # instead of emitting a real one. LM Studio ignores tool_choice="required" and
 # corrective retries come back empty, so we salvage by parsing the leaked text.
 TOOL_NAME_LEAK = re.compile(
-    r"\b(capture_tasks|complete_tasks|update_task|link_tasks|open_view|search_tasks)\b")
+    r"\b(capture_tasks|complete_tasks|update_task|link_tasks|move_task|open_view|search_tasks)\b")
 
 
 class _SalvagedFunction:

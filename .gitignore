@@ -5,3 +5,7 @@ lens.db
 lens.db.backup-*
 .env
 .pytest_cache/
+
+# Personal tooling kept out of the public repo (preserved on the `personal` branch)
+seed_lens.py
+spec.md
