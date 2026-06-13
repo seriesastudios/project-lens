@@ -26,6 +26,7 @@ from app.engine import brain
 
 def seed_tasks():
     website = models.add_node("Website redesign", node_type="project")
+    marketing = models.add_node("Marketing campaign", node_type="project")
     mockups = models.add_node("Finish Figma mockups", target_date="2026-06-15")
     landing = models.add_node("Build landing page")
     invoices = models.add_node("Send invoices to clients")
@@ -34,8 +35,9 @@ def seed_tasks():
     models.add_edge(website, mockups, "is_part_of")
     models.add_edge(website, landing, "is_part_of")
     models.add_edge(mockups, landing, "blocks")
-    return {"website": website, "mockups": mockups, "landing": landing,
-            "invoices": invoices, "dentist": dentist, "groceries": groceries}
+    return {"website": website, "marketing": marketing, "mockups": mockups,
+            "landing": landing, "invoices": invoices, "dentist": dentist,
+            "groceries": groceries}
 
 
 async def run_decision_stage(user_text, max_rounds=4):
@@ -156,6 +158,8 @@ def build_cases(ids):
          expect_tool("update_task", lambda a: True if a["node_id"] == ids["landing"] and a.get("status") == "on_hold" else f"args {a}")),
         ("promote task to project with tasks", "I want the landing page to be its own project with tasks: write the copy, choose a template, and add a contact form",
          expect_promote_with_tasks),
+        ("move task between projects", "actually, move the figma mockups over to the marketing campaign instead",
+         expect_tool("move_task", lambda a: True if a.get("node_id") == ids["mockups"] and "marketing" in (a.get("to_project_name") or "").lower() else f"args {a}")),
         ("dependency", "buying groceries is blocked by sending the invoices",
          expect_tool("link_tasks", lambda a: True if a["relationship"] == "blocks" and a["parent_id"] == ids["invoices"] else f"args {a}")),
         ("focus project opens project view", "let's focus on the website redesign",

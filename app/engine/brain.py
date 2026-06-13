@@ -159,7 +159,7 @@ RULES
 2. Deadlines: pass the deadline exactly as the user said it ("Friday", "end of month", "June 3") or as YYYY-MM-DD — the system converts relative dates itself. No date stated or implied → omit the field, never invent one.
 3. The user finished something → call complete_tasks with ALL matching IDs from ACTIVE TASKS, in one call. Match loosely: "sent the invoices" matches "Send invoices to clients". Never create a task for finished work; if nothing matches, ask one short question.
 4. Reword, change deadline, change importance, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change. update_task is for tasks that ALREADY EXIST in ACTIVE TASKS. Importance words about an existing task ("X is critical" → priority high; "X is low priority, no rush" → low). Set priority ONLY when the user signals it — never infer it. PROMOTE an existing task to a project ("make X its own project", "I want X to be its own project with A, B, C", "turn X into a project") → in the SAME turn: (1) call update_task on X with node_type "project"; (2) if they name new tasks A, B, C, call capture_tasks for them with parent_id = X's id. If X isn't in ACTIVE TASKS, search_tasks for it first.
-5. A dependency or grouping is stated → call link_tasks. The BLOCKER is always parent_id: "X blocks Y" → X is parent_id; "Y is blocked by X" → X is still parent_id. Use is_part_of for project/subtask grouping.
+5. A dependency or grouping is stated → call link_tasks. The BLOCKER is always parent_id: "X blocks Y" → X is parent_id; "Y is blocked by X" → X is still parent_id. Use is_part_of for project/subtask grouping. RELOCATE an existing task ("move X to Y", "file X under Y instead", "put X in Y") → call move_task — it pulls X out of its current project and refiles it. Pass to_project_name for a project destination, or new_parent_id to file X under another task. Reserve link_tasks (is_part_of) for "X is ALSO part of Y" (keep both homes). If X (or an ID destination) isn't in ACTIVE TASKS, search_tasks first.
 6. ANY request to see tasks is NAVIGATION — call open_view, never answer with a text list:
    - "focus on X" / "let's work on X" / "open X" / "what's left on X" / "where am I on X" → open_view {"view": "project", "project_name": "X"}. Pass the project's name as the user said it — the system finds the project and shows ALL its open tasks itself. Do NOT pass node_ids and do NOT search first.
    - "what are my projects" / "show my projects" / "what's on my plate" → open_view {"view": "projects"}.
@@ -450,6 +450,23 @@ class LinkTasksArgs(BaseModel):
         return value
 
 
+class MoveTaskArgs(BaseModel):
+    node_id: int
+    to_project_name: Optional[str] = None
+    new_parent_id: Optional[int] = None
+
+    @model_validator(mode="after")
+    def check_destination(self):
+        has_name = bool((self.to_project_name or "").strip())
+        has_id = self.new_parent_id is not None
+        if has_name == has_id:
+            raise ValueError("move_task needs exactly one destination: to_project_name "
+                             "(a project by name) OR new_parent_id (another task by ID).")
+        if has_id and self.new_parent_id == self.node_id:
+            raise ValueError("A task cannot be moved under itself.")
+        return self
+
+
 class OpenViewArgs(BaseModel):
     view: str
     project_name: Optional[str] = None
@@ -553,6 +570,22 @@ LENS_TOOLS: Any = [
                     "relationship": {"type": "string", "enum": ["is_part_of", "blocks", "depends_on", "related_to"]}
                 },
                 "required": ["parent_id", "child_id", "relationship"]
+            }
+        }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "move_task",
+            "description": "RELOCATE an existing task to a new home — detaches it from its current project(s) and files it under the destination. Use for 'move X to Y' / 'file X under Y instead'. (To ADD a home while keeping the others, use link_tasks with is_part_of instead.)",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "node_id": {"type": "integer", "description": "ID of the task to move."},
+                    "to_project_name": {"type": "string", "description": "Destination project, named as the user said it (the system resolves it). Use this when moving into a project."},
+                    "new_parent_id": {"type": "integer", "description": "Destination task ID, when moving the task UNDER another existing task (making it a subtask). Use an ID from ACTIVE TASKS or search results."}
+                },
+                "required": ["node_id"]
             }
         }
     },
@@ -682,6 +715,36 @@ def _execute_link(args: LinkTasksArgs) -> dict:
             "relationship": args.relationship}
 
 
+def _execute_move(args: MoveTaskArgs) -> dict:
+    """Relocate a task: drop ALL its current is_part_of parents, then file it
+    under exactly one destination (a project by name, or another task by ID)."""
+    from app.engine import views
+
+    if not models.existing_node_ids([args.node_id]):
+        return {"error": f"Task {args.node_id} does not exist. Use an ID from the active task list."}
+
+    if args.to_project_name:
+        resolved = views.resolve_project(args.to_project_name)
+        if isinstance(resolved, list):
+            if not resolved:
+                return {"error": (f"No project found matching {args.to_project_name!r}. "
+                                  "If it's a NEW project, capture it first; to move under an "
+                                  "existing task, pass new_parent_id instead.")}
+            return {"error": f"Multiple projects match {args.to_project_name!r} — ask the user which one.",
+                    "candidates": [{"id": p["id"], "name": p["content"]} for p in resolved]}
+        target_id = resolved["id"]
+    else:
+        if not models.existing_node_ids([args.new_parent_id]):
+            return {"error": f"Destination task {args.new_parent_id} does not exist. Use an ID from the active task list."}
+        target_id = args.new_parent_id
+
+    detached = models.detach_parents(args.node_id)
+    models.add_edge(target_id, args.node_id, "is_part_of")
+    seen_node_ids.update({args.node_id, target_id})
+    return {"success": True, "node_id": args.node_id, "to": _node_content(target_id),
+            "detached": detached}
+
+
 def _execute_open_view(args: OpenViewArgs) -> dict:
     """Navigation: the model names a destination; Python resolves it into a view.
     The model never picks which tasks a project view contains — that's a query."""
@@ -746,6 +809,7 @@ TOOL_HANDLERS = {
     "complete_tasks": (CompleteTasksArgs, _execute_complete),
     "update_task": (UpdateTaskArgs, _execute_update),
     "link_tasks": (LinkTasksArgs, _execute_link),
+    "move_task": (MoveTaskArgs, _execute_move),
     "open_view": (OpenViewArgs, _execute_open_view),
     "search_tasks": (SearchTasksArgs, _execute_search),
 }
@@ -760,6 +824,10 @@ def _referenced_ids(func_name: str, args) -> List[int]:
         return [args.node_id]
     if func_name == "link_tasks":
         return [args.parent_id, args.child_id]
+    if func_name == "move_task":
+        # to_project_name is name-resolved (no ID to ground); an explicit
+        # new_parent_id destination must be grounded, like link_tasks.
+        return [args.node_id] + ([args.new_parent_id] if args.new_parent_id is not None else [])
     if func_name == "capture_tasks":
         return [item.parent_id for item in args.tasks if item.parent_id is not None]
     return []
@@ -869,6 +937,10 @@ def _confirmation_sentences(name: str, result: dict) -> Optional[List[str]]:
             sentences.append(f"Filed **{child}** under **{parent}**.")
         else:
             sentences.append(f"Linked **{parent}** and **{child}**.")
+
+    elif name == "move_task":
+        content = _node_content(result["node_id"])
+        sentences.append(f"Moved **{content}** to **{result['to']}**.")
 
     elif name == "open_view":
         view = result.get("view")

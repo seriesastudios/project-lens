@@ -373,6 +373,98 @@ def test_update_task_rejects_bad_node_type():
     assert "error" in result
 
 
+def _is_part_of_parents(node_id):
+    return {e["parent_id"] for e in models.get_edges_for_node(node_id)
+            if e["child_id"] == node_id and e["relationship"] == "is_part_of"}
+
+
+def test_move_task_to_project_relocates_single_home():
+    a = models.add_node("Project A", node_type="project")
+    b = models.add_node("Project B", node_type="project")
+    task = models.add_node("Draft the op-ed")
+    models.add_edge(a, task, "is_part_of")
+
+    result = json.loads(execute_tool_call(fake_call("move_task", {
+        "node_id": task, "to_project_name": "Project B"
+    })))
+    assert result["success"]
+    assert result["to"] == "Project B"
+    assert result["detached"] == 1
+    assert _is_part_of_parents(task) == {b}          # only B now
+    assert models.get_node(task)["node_type"] == "task"  # type unchanged
+
+
+def test_move_task_is_a_true_move_for_multihome():
+    a = models.add_node("The Cage", node_type="project")
+    b = models.add_node("AI Ethics", node_type="project")
+    c = models.add_node("Press", node_type="project")
+    op_ed = models.add_node("Globe op-ed")
+    models.add_edge(a, op_ed, "is_part_of")
+    models.add_edge(b, op_ed, "is_part_of")
+
+    result = json.loads(execute_tool_call(fake_call("move_task", {
+        "node_id": op_ed, "to_project_name": "Press"
+    })))
+    assert result["success"]
+    assert result["detached"] == 2
+    assert _is_part_of_parents(op_ed) == {c}         # dropped BOTH old homes
+
+
+def test_move_task_under_another_task_by_id():
+    prep = models.add_node("Picture Shop prep")
+    foley = models.add_node("Foley check")
+    result = json.loads(execute_tool_call(fake_call("move_task", {
+        "node_id": foley, "new_parent_id": prep
+    })))
+    assert result["success"]
+    assert foley in models.get_active_child_ids(prep)
+
+
+def test_move_task_validation_errors():
+    t = models.add_node("Lonely task")
+    other = models.add_node("Somewhere", node_type="project")
+    # neither destination
+    assert "error" in json.loads(execute_tool_call(fake_call("move_task", {"node_id": t})))
+    # both destinations
+    assert "error" in json.loads(execute_tool_call(fake_call("move_task", {
+        "node_id": t, "to_project_name": "Somewhere", "new_parent_id": other})))
+    # under itself
+    assert "error" in json.loads(execute_tool_call(fake_call("move_task", {
+        "node_id": t, "new_parent_id": t})))
+    # non-existent project destination
+    assert "error" in json.loads(execute_tool_call(fake_call("move_task", {
+        "node_id": t, "to_project_name": "No Such Project Anywhere"})))
+
+
+def test_move_task_confirmation_and_grounding():
+    from app.engine import brain
+    from app.engine.brain import template_confirmation
+    dest = models.add_node("Destination project", node_type="project")
+    task = models.add_node("Wandering task")
+
+    # confirmation reads as a move
+    result = json.loads(execute_tool_call(fake_call("move_task", {
+        "node_id": task, "to_project_name": "Destination project"})))
+    assert template_confirmation([("move_task", result)]) == \
+        "Moved **Wandering task** to **Destination project**."
+
+    # grounding: an unseen node_id is rejected, but a name destination needs no ID grounding
+    brain.reset_session()
+    grounded = models.add_node("Seen task")
+    rejected = json.loads(execute_tool_call(
+        fake_call("move_task", {"node_id": grounded, "to_project_name": "Destination project"}),
+        enforce_grounding=True))
+    assert "error" in rejected  # node_id not yet seen
+    models.add_node("noise")
+    search = json.loads(execute_tool_call(fake_call("search_tasks", {"query": "seen"})))
+    assert any(r["id"] == grounded for r in search["results"])
+    ok = json.loads(execute_tool_call(
+        fake_call("move_task", {"node_id": grounded, "to_project_name": "Destination project"}),
+        enforce_grounding=True))
+    assert ok["success"]
+    brain.reset_session()
+
+
 def test_update_task_attaches_description():
     node_id = models.add_node("Lock credits in offline edit")
     result = json.loads(execute_tool_call(fake_call("update_task", {
