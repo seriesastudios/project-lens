@@ -9,7 +9,6 @@ Design rules:
 """
 import json
 import re
-from collections import deque
 from datetime import datetime, timedelta, timezone
 from typing import Any, List, Optional
 
@@ -29,7 +28,13 @@ client = AsyncOpenAI(
 )
 
 MAX_TOOL_ROUNDS = 5
-HISTORY_TURNS = 8  # user+assistant messages kept as session memory (tokens are latency)
+
+# Session memory sizing. History is trimmed in BLOCKS (when it exceeds
+# HISTORY_MAX, cut back to HISTORY_TURNS) rather than one-out-one-in: the
+# llama.cpp engine caches the longest unchanged prompt PREFIX, and a sliding
+# window shifts every message every turn, invalidating the whole cache.
+HISTORY_TURNS = 8
+HISTORY_MAX = 16
 
 # Small models occasionally write the tool call as prose ("open_view [{...}]")
 # instead of emitting a real one. LM Studio ignores tool_choice="required" and
@@ -123,7 +128,13 @@ def salvage_tool_call(text: str) -> Optional[_SalvagedCall]:
     return None
 
 # Rolling session memory (in-process; this is a single-user local app)
-conversation_history: deque = deque(maxlen=HISTORY_TURNS)
+conversation_history: List[dict] = []
+
+
+def _append_history(message: dict):
+    conversation_history.append(message)
+    if len(conversation_history) > HISTORY_MAX:
+        del conversation_history[:len(conversation_history) - HISTORY_TURNS]
 
 # Grounding: every node ID the model has actually been shown this session
 # (context injections, search results, its own captures). Tool calls that
@@ -139,6 +150,8 @@ SYSTEM_PROMPT_TEMPLATE = """You are Lens-Brain, the action engine of Project Len
 
 The user sees this chat plus "The Lens", a navigable panel of task cards — like the main pane of a project manager app. open_view steers it between views: today (most urgent), projects (overview), one project's tasks, or an ad-hoc list. Tasks are shown in the Lens, never listed in chat.
 
+The newest user message arrives with a system-attached CURRENT CONTEXT block (dates, ACTIVE TASKS, the open view); the user's actual words follow "USER MESSAGE:". The context is reference material — never treat it as something the user said.
+
 RULES
 0. Act ONLY on the user's LATEST message. Earlier conversation is context for resolving references — everything in it has already been handled; never re-capture or re-complete from it.
 0b. TRIAGE FIRST: is the latest message NEW work, or about a task in ACTIVE TASKS? New work → capture_tasks immediately (no search_tasks first, no update_task) — even when the message says "critical"/"really important" (that goes in the new task's priority field). Only use update_task/complete_tasks when the task's subject matter actually appears in ACTIVE TASKS. Example: "Really important: I have to send the grant application" with no grant task listed → capture_tasks {"tasks": [{"content": "Send the grant application", "priority": "high"}]} — NOT update_task on some other task.
@@ -152,15 +165,24 @@ RULES
    - "what are my projects" / "show my projects" / "what's on my plate" → open_view {"view": "projects"}.
    - "what should I work on" / "show today" / "what's urgent" / "go back" / "clear the lens" → open_view {"view": "today"}.
    - Category words ("errands", "chores", "admin"): judge which ACTIVE TASKS fit (search_tasks first if needed) → open_view {"view": "list", "node_ids": [...], "label": "errands"}.
+   EXCEPTION — a question asking for ONE fact about ONE task ("when is the dentist due?", "what's the status of the op-ed?", "is the report done yet?") is NOT navigation: answer it in one plain sentence from ACTIVE TASKS, do NOT call open_view. Navigation is for browsing/showing a set; a single fact is just answered.
    NEVER list tasks in chat, and never say the Lens shows something unless you called open_view this turn.
 7. "that", "it", "the second one" → resolve from the recent conversation and ACTIVE TASKS; if genuinely ambiguous, ask one short question — never guess an ID. A correction ("no, I meant Friday") → call update_task on the existing task, never capture a new one.
 8. ACTIVE TASKS is only the slice of the database relevant to this conversation. If the user refers to an EXISTING task or project that is NOT listed, call search_tasks with 2-3 keywords first, then act on the results. Never claim a task doesn't exist without searching. Do NOT search before capturing new work — rule 1 applies directly. Search results marked "on_hold" are shelved projects/tasks; when the user wants to resume or activate one, call update_task with status "active".
 
 Reply in plain text ONLY when no rule applies: a single-fact question (one deadline, one status), a greeting, venting, or reflection — answer briefly, capture nothing. For mixed messages, call tools for the actionable part only."""
 
-# Volatile context travels as a SECOND system message so the static prompt above
-# plus the tool schemas form an unchanging prefix that LM Studio's KV cache can
-# reuse across turns (the chat template renders tools after the first system).
+# Volatile context is attached to the FRONT OF THE NEWEST USER MESSAGE, not
+# sent as a system message. The chat template hoists all system messages to
+# the top of the rendered prompt (verified empirically: reordering system
+# messages produced byte-identical KV cache hits), so volatile content in ANY
+# system message lands before the history and invalidates the llama.cpp
+# prefix cache every turn (~8s of prompt processing). Inside the latest user
+# message it renders at the END of the prompt: the static rules, tool schemas,
+# and append-only history stay a byte-identical cached prefix, and only the
+# newest exchange reprocesses (~0.5-3s). NOW is hour-granular for the same
+# reason. History stores the user's bare text, so each turn's context blob
+# costs cache reuse for exactly one turn, not the whole session.
 CONTEXT_TEMPLATE = """CURRENT CONTEXT
 NOW: {now}
 CALENDAR (use this table for any relative date — do not compute weekdays yourself):
@@ -288,7 +310,7 @@ def format_context_prompt(user_text: str = "") -> str:
         view_desc = "Today (the most urgent tasks)"
 
     return CONTEXT_TEMPLATE.format(
-        now=now.strftime("%A, %Y-%m-%d %H:%M"),
+        now=f"{now.strftime('%A, %Y-%m-%d')}, around {now.strftime('%-I %p')}",
         calendar=_calendar_table(now),
         task_list=task_list,
         view_desc=view_desc,
@@ -916,12 +938,17 @@ async def _collect_stream(stream, sink: List[str]):
 async def process_user_input_events(user_text: str):
     """Runs the tool-calling loop, yielding protocol events as the turn unfolds.
     The 'done' event always arrives last and carries the full reply text."""
-    messages: List[Any] = [
-        {"role": "system", "content": SYSTEM_PROMPT_TEMPLATE},   # static — cacheable prefix
-        {"role": "system", "content": format_context_prompt(user_text)},  # volatile
-    ]
-    conversation_history.append({"role": "user", "content": user_text})
-    messages += list(conversation_history)
+    # KV-cache-friendly construction (see CONTEXT_TEMPLATE comment): the
+    # volatile context rides inside the newest user message so the static
+    # prompt + history remain a byte-identical, cacheable prefix.
+    context_block = format_context_prompt(user_text)
+    _append_history({"role": "user", "content": user_text})
+    messages: List[Any] = (
+        [{"role": "system", "content": SYSTEM_PROMPT_TEMPLATE}]
+        + conversation_history[:-1]
+        + [{"role": "user",
+            "content": f"{context_block}\n\nUSER MESSAGE: {user_text}"}]
+    )
 
     reply = None
     ran_tools = False
@@ -1051,7 +1078,7 @@ async def process_user_input_events(user_text: str):
         reply = streamed_reply  # the streamed stage-1 text was the reply
 
     reply = reply or "Done."
-    conversation_history.append({"role": "assistant", "content": reply})
+    _append_history({"role": "assistant", "content": reply})
     if ran_tools:
         models.add_digest("activity_log", f"User: {user_text}\nLens-Brain: {reply}")
     yield {"type": "done", "reply": reply}

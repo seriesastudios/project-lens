@@ -42,10 +42,11 @@ async def run_decision_stage(user_text, max_rounds=4):
     """Mirrors the app's stage-1 loop: multi-round tool calling with execution,
     leak salvage, and grounding. Returns every successfully EXECUTED call."""
     brain.reset_session()
+    # Mirror the app's cache-friendly shape: context rides in the user message.
     messages = [
         {"role": "system", "content": brain.SYSTEM_PROMPT_TEMPLATE},
-        {"role": "system", "content": brain.format_context_prompt(user_text)},
-        {"role": "user", "content": user_text},
+        {"role": "user",
+         "content": f"{brain.format_context_prompt(user_text)}\n\nUSER MESSAGE: {user_text}"},
     ]
     executed = []
     final_text = ""
