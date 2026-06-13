@@ -155,7 +155,7 @@ The newest user message arrives with a system-attached CURRENT CONTEXT block (da
 RULES
 0. Act ONLY on the user's LATEST message. Earlier conversation is context for resolving references — everything in it has already been handled; never re-capture or re-complete from it.
 0b. TRIAGE FIRST: is the latest message NEW work, or about a task in ACTIVE TASKS? New work → capture_tasks immediately (no search_tasks first, no update_task) — even when the message says "critical"/"really important" (that goes in the new task's priority field). Only use update_task/complete_tasks when the task's subject matter actually appears in ACTIVE TASKS. Example: "Really important: I have to send the grant application" with no grant task listed → capture_tasks {"tasks": [{"content": "Send the grant application", "priority": "high"}]} — NOT update_task on some other task.
-1. The user mentions new work, a goal, or a commitment → call capture_tasks with EVERY distinct task in the message. A project with steps → one item with node_type "project" and the steps in subtasks. Set parent_id when it clearly belongs to an existing item. If they signal importance about the NEW work ("critical", "really important", "must do") set priority "high" on it ("no rush"/"whenever" → "low") — still capture_tasks, never update_task. Never capture anything already in ACTIVE TASKS.
+1. The user mentions new work, a goal, or a commitment → call capture_tasks with EVERY distinct task in the message. A project with steps → one item with node_type "project" and the steps in subtasks. Set parent_id when it clearly belongs to an existing item — parent_id may be ANY existing task, not just a project, so "add X and Y under <task>" or "as subtasks of <task>" files them as that task's subtasks. If they signal importance about the NEW work ("critical", "really important", "must do") set priority "high" on it ("no rush"/"whenever" → "low") — still capture_tasks, never update_task. Never capture anything already in ACTIVE TASKS.
 2. Deadlines: pass the deadline exactly as the user said it ("Friday", "end of month", "June 3") or as YYYY-MM-DD — the system converts relative dates itself. No date stated or implied → omit the field, never invent one.
 3. The user finished something → call complete_tasks with ALL matching IDs from ACTIVE TASKS, in one call. Match loosely: "sent the invoices" matches "Send invoices to clients". Never create a task for finished work; if nothing matches, ask one short question.
 4. Reword, change deadline, change importance, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change. update_task is for tasks that ALREADY EXIST in ACTIVE TASKS. Importance words about an existing task ("X is critical" → priority high; "X is low priority, no rush" → low). Set priority ONLY when the user signals it — never infer it.
@@ -295,11 +295,11 @@ def format_context_prompt(user_text: str = "") -> str:
         task_list = "No active tasks."
 
     mode = view["mode"]
-    if mode == "project":
-        project = models.get_node(view["project_id"])
-        project_name = project["content"] if project else "a project"
-        view_desc = (f"the project '{project_name}' (ID {view['project_id']}) — "
-                     "'here'/'this project' in the user's message means this one")
+    if mode == "node":
+        current = models.get_node(view["path"][-1])
+        current_name = current["content"] if current else "a project"
+        view_desc = (f"'{current_name}' (ID {view['path'][-1]}) and its open items — "
+                     "'here'/'this' in the user's message means this one")
     elif mode == "projects":
         view_desc = "the all-projects overview"
     elif mode == "list":
@@ -684,7 +684,7 @@ def _execute_open_view(args: OpenViewArgs) -> dict:
         if resolved["status"] != "active":
             return {"error": (f"Project '{resolved['content']}' is on hold. To work on it, "
                               "resume it first with update_task status 'active', then open it.")}
-        views.set_view({"mode": "project", "project_id": resolved["id"]})
+        views.set_view({"mode": "node", "path": [resolved["id"]]})
         open_ids = models.get_active_child_ids(resolved["id"])
         seen_node_ids.update(open_ids)
         seen_node_ids.add(resolved["id"])

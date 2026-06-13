@@ -13,7 +13,7 @@ def seed_many(count=40):
     ids["project"] = models.add_node("Design studio", node_type="project")
     ids["on_screen"] = models.add_node("Design new logo")
     models.add_edge(ids["project"], ids["on_screen"], "is_part_of")
-    views.set_view({"mode": "project", "project_id": ids["project"]})
+    views.set_view({"mode": "node", "path": [ids["project"]]})
     return ids
 
 

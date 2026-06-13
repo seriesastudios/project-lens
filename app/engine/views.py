@@ -6,11 +6,14 @@ is sticky — it survives turns and server restarts until the user navigates
 
     {"mode": "today"}                                  — default: most urgent, capped
     {"mode": "projects"}                               — overview of all projects
-    {"mode": "project", "project_id": 526}             — inside one project
+    {"mode": "node", "path": [526]}                    — inside one container (project)
+    {"mode": "node", "path": [526, 612]}               — Cage ▸ Picture Shop prep (subtasks)
     {"mode": "list", "node_ids": [...], "label": "…"}  — ad-hoc query results
     {"mode": "loose"}                                  — tasks belonging to no project
 
-The model never hand-picks view membership; it names a target ("The Cage") and
+A node is a *container* iff it has active is_part_of children; the path is the
+breadcrumb trail and path[-1] is the container whose children are shown. The
+model never hand-picks view membership; it names a target ("The Cage") and
 resolve_project / the compute functions turn that into queries deterministically.
 """
 import json
@@ -21,14 +24,16 @@ from app.engine import scoring
 
 VIEW_STATE_KEY = "view"
 DEFAULT_VIEW: Dict[str, Any] = {"mode": "today"}
-VALID_MODES = ("today", "projects", "project", "list", "loose")
+VALID_MODES = ("today", "projects", "node", "list", "loose")
 
 
 def _valid(view: Any) -> bool:
     if not isinstance(view, dict) or view.get("mode") not in VALID_MODES:
         return False
-    if view["mode"] == "project" and not isinstance(view.get("project_id"), int):
-        return False
+    if view["mode"] == "node":
+        path = view.get("path")
+        if not isinstance(path, list) or not path or not all(isinstance(i, int) for i in path):
+            return False
     if view["mode"] == "list":
         ids = view.get("node_ids")
         if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids):
@@ -90,39 +95,57 @@ def resolve_project(name: str) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
     return hits
 
 
+def _active_path(path: List[int]) -> List[int]:
+    """Trims a node path to its valid prefix: stops at the first id that is
+    missing or inactive (a completed container collapses the trail below it)."""
+    valid: List[int] = []
+    for nid in path:
+        node = models.get_node(nid)
+        if not node or node["status"] != "active":
+            break
+        valid.append(nid)
+    return valid
+
+
 def view_meta(view: Dict[str, Any], cards: List[Dict[str, Any]]) -> Dict[str, Any]:
-    """The header payload the UI renders: mode, human label, whether 'back' applies."""
+    """The header payload the UI renders: mode, label, breadcrumb trail, back."""
     mode = view["mode"]
+    breadcrumb: List[Dict[str, Any]] = []
     if mode == "today":
         label = "Today"
     elif mode == "projects":
         label = "Projects"
-    elif mode == "project":
-        node = models.get_node(view["project_id"])
-        label = node["content"] if node else "Project"
+    elif mode == "node":
+        for nid in view["path"]:
+            node = models.get_node(nid)
+            breadcrumb.append({"id": nid, "label": node["content"] if node else "?"})
+        label = breadcrumb[-1]["label"] if breadcrumb else "?"
     elif mode == "loose":
         label = "Loose tasks"
     else:
         label = view.get("label") or "Selection"
-    return {"mode": mode, "label": label, "count": len(cards), "back": mode != "today"}
+    return {"mode": mode, "label": label, "breadcrumb": breadcrumb,
+            "count": len(cards), "back": mode != "today"}
 
 
 def compute_view_cards() -> Dict[str, Any]:
     """Reads the graph and the current view, returns {'view': meta, 'cards': [...]}.
-    Stale views (entered project completed, list emptied) fall back to Today."""
+    Stale views (entered container completed, list emptied) fall back gracefully."""
     nodes = models.get_active_nodes()
     edges = models.get_all_edges()
     view = get_view()
 
-    if view["mode"] == "project":
-        project = models.get_node(view["project_id"])
-        if not project or project["status"] != "active":
+    if view["mode"] == "node":
+        trimmed = _active_path(view["path"])
+        if not trimmed:
             view = set_view(dict(DEFAULT_VIEW))
+        elif trimmed != view["path"]:
+            view = set_view({"mode": "node", "path": trimmed})
 
     if view["mode"] == "projects":
         cards = scoring.compute_projects_overview(nodes, edges)
-    elif view["mode"] == "project":
-        cards = scoring.compute_project_detail(nodes, edges, view["project_id"])
+    elif view["mode"] == "node":
+        cards = scoring.compute_container_detail(nodes, edges, view["path"][-1])
         cards = scoring.annotate_projects(cards, nodes, edges)
     elif view["mode"] == "loose":
         cards = scoring.compute_loose_tasks(nodes, edges)
@@ -135,6 +158,7 @@ def compute_view_cards() -> Dict[str, Any]:
     else:  # today
         cards = scoring.annotate_projects(scoring.compute_today(nodes, edges), nodes, edges)
 
+    scoring.annotate_child_counts(cards, nodes, edges)
     return {"view": view_meta(view, cards), "cards": cards}
 
 
@@ -142,8 +166,9 @@ def view_member_ids(view: Optional[Dict[str, Any]] = None) -> List[int]:
     """Node IDs the current view is 'about' — used to prioritize prompt context
     (the tasks the user is looking at are what 'this'/'here' refer to)."""
     view = view or get_view()
-    if view["mode"] == "project":
-        return [view["project_id"]] + models.get_active_child_ids(view["project_id"])
+    if view["mode"] == "node":
+        current = view["path"][-1]
+        return [current] + models.get_active_child_ids(current)
     if view["mode"] == "list":
         return list(view["node_ids"])
     return []

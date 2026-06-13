@@ -30,9 +30,9 @@ def test_default_view_is_today():
 
 def test_view_is_sticky_in_the_database():
     project, _ = seed_project()
-    views.set_view({"mode": "project", "project_id": project})
+    views.set_view({"mode": "node", "path": [project]})
     # a fresh read (as after a server restart) returns the same view
-    assert views.get_view() == {"mode": "project", "project_id": project}
+    assert views.get_view() == {"mode": "node", "path": [project]}
 
 
 def test_corrupt_or_invalid_state_falls_back_to_today():
@@ -40,7 +40,7 @@ def test_corrupt_or_invalid_state_falls_back_to_today():
     assert views.get_view() == {"mode": "today"}
     models.set_state(views.VIEW_STATE_KEY, '{"mode": "warp"}')
     assert views.get_view() == {"mode": "today"}
-    models.set_state(views.VIEW_STATE_KEY, '{"mode": "project"}')  # missing project_id
+    models.set_state(views.VIEW_STATE_KEY, '{"mode": "node"}')  # missing path
     assert views.get_view() == {"mode": "today"}
 
 
@@ -48,6 +48,8 @@ def test_set_view_rejects_invalid_shapes():
     import pytest
     with pytest.raises(ValueError):
         views.set_view({"mode": "nonsense"})
+    with pytest.raises(ValueError):
+        views.set_view({"mode": "node", "path": []})        # empty path
     with pytest.raises(ValueError):
         views.set_view({"mode": "list", "node_ids": ["a"]})
 
@@ -92,22 +94,50 @@ def test_resolve_project_ignores_tasks_with_matching_names():
 # compute_view_cards dispatch + fallbacks
 # ---------------------------------------------------------------------------
 
-def test_compute_view_cards_project_mode_shows_all_children():
+def test_compute_view_cards_node_mode_shows_all_children():
     project, children = seed_project(task_count=4)
     # noise outside the project must not appear
     models.add_node("Unrelated urgent", target_date=today_plus(0))
-    views.set_view({"mode": "project", "project_id": project})
+    views.set_view({"mode": "node", "path": [project]})
 
     state = views.compute_view_cards()
-    assert state["view"]["mode"] == "project"
+    assert state["view"]["mode"] == "node"
     assert state["view"]["label"] == "The Cage"
+    assert state["view"]["breadcrumb"] == [{"id": project, "label": "The Cage"}]
     assert state["view"]["back"] is True
     assert {c["id"] for c in state["cards"]} == set(children)
 
 
+def test_drill_into_a_subtask_container():
+    project, children = seed_project(task_count=2)
+    parent = children[0]
+    sub_a = models.add_node("Sub A", target_date=today_plus(1))
+    sub_b = models.add_node("Sub B")
+    models.add_edge(parent, sub_a, "is_part_of")
+    models.add_edge(parent, sub_b, "is_part_of")
+    views.set_view({"mode": "node", "path": [project, parent]})
+
+    state = views.compute_view_cards()
+    assert {c["id"] for c in state["cards"]} == {sub_a, sub_b}
+    assert [b["id"] for b in state["view"]["breadcrumb"]] == [project, parent]
+
+
+def test_stale_path_tail_is_trimmed():
+    project, children = seed_project(task_count=2)
+    parent = children[0]
+    sub = models.add_node("Sub")
+    models.add_edge(parent, sub, "is_part_of")
+    views.set_view({"mode": "node", "path": [project, parent]})
+    models.complete_nodes([parent])  # the deeper container is gone
+
+    state = views.compute_view_cards()
+    assert views.get_view() == {"mode": "node", "path": [project]}  # trimmed, not dropped
+    assert {c["id"] for c in state["cards"]} == set(children) - {parent}
+
+
 def test_completed_project_view_falls_back_to_today():
-    project, children = seed_project()
-    views.set_view({"mode": "project", "project_id": project})
+    project, _children = seed_project()
+    views.set_view({"mode": "node", "path": [project]})
     models.complete_nodes([project])
 
     state = views.compute_view_cards()
@@ -137,7 +167,7 @@ def test_list_view_filters_to_still_active():
 
 def test_view_member_ids_for_context():
     project, children = seed_project()
-    views.set_view({"mode": "project", "project_id": project})
+    views.set_view({"mode": "node", "path": [project]})
     assert set(views.view_member_ids()) == {project, *children}
     views.set_view({"mode": "today"})
     assert views.view_member_ids() == []

@@ -119,20 +119,25 @@ async def get_lens():
 
 class ViewRequest(BaseModel):
     mode: str
-    project_id: int | None = None
+    path: list[int] | None = None        # for mode "node": breadcrumb trail of container ids
+    project_id: int | None = None        # legacy: entering a single project
 
 
 @app.post("/api/view")
 async def set_view(request: ViewRequest):
-    """Deterministic click navigation — entering a project or going back never
-    needs an LLM round-trip."""
-    if request.mode == "project":
-        if request.project_id is None:
-            raise HTTPException(status_code=422, detail="mode 'project' requires project_id")
-        node = models.get_node(request.project_id)
-        if not node or node.get("node_type") != "project" or node["status"] != "active":
-            raise HTTPException(status_code=404, detail=f"No active project {request.project_id}")
-        views.set_view({"mode": "project", "project_id": request.project_id})
+    """Deterministic click navigation — entering a container, drilling into a
+    subtask, or climbing the breadcrumb never needs an LLM round-trip."""
+    if request.mode in ("node", "project"):
+        # Accept either the new path form or the legacy single project_id.
+        path = request.path if request.path else (
+            [request.project_id] if request.project_id is not None else [])
+        if not path:
+            raise HTTPException(status_code=422, detail="mode 'node' requires a non-empty path")
+        for nid in path:
+            node = models.get_node(nid)
+            if not node or node["status"] != "active":
+                raise HTTPException(status_code=404, detail=f"No active node {nid} in path")
+        views.set_view({"mode": "node", "path": path})
     elif request.mode in ("today", "projects", "loose"):
         views.set_view({"mode": request.mode})
     else:

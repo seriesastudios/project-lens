@@ -133,13 +133,13 @@ def _project_graph():
 
 def test_project_detail_shows_all_members_no_cap():
     nodes, edges = _project_graph()
-    cards = scoring.compute_project_detail(nodes, edges, project_id=1)
+    cards = scoring.compute_container_detail(nodes, edges, 1)
     assert {c["id"] for c in cards} == {2, 3, 4, 6}  # everything, even undated/low
 
 
 def test_project_detail_sorted_by_urgency_then_importance():
     nodes, edges = _project_graph()
-    cards = scoring.compute_project_detail(nodes, edges, project_id=1)
+    cards = scoring.compute_container_detail(nodes, edges, 1)
     ids = [c["id"] for c in cards]
     assert ids[0] == 3                    # imminent deadline first
     assert ids.index(4) < ids.index(2)    # dated+high beats undated
@@ -148,7 +148,7 @@ def test_project_detail_sorted_by_urgency_then_importance():
 
 def test_project_detail_excludes_other_projects_tasks():
     nodes, edges = _project_graph()
-    cards = scoring.compute_project_detail(nodes, edges, project_id=1)
+    cards = scoring.compute_container_detail(nodes, edges, 1)
     assert 5 not in {c["id"] for c in cards}
 
 
@@ -224,6 +224,54 @@ def test_annotate_adds_project_names():
     card = next(c for c in cards if c["id"] == task_a)
     assert card["project_name"] == "The Cage"
     assert card["project_open_total"] == 1
+
+
+def test_container_detail_works_for_a_task_parent():
+    # A task with subtasks is a container too — same function, any parent.
+    nodes = [
+        make_node(1, "The Cage", node_type="project"),
+        make_node(2, "Prep for Picture Shop"),
+        make_node(3, "Lock credits", target_date=datetime.now().date().isoformat()),
+        make_node(4, "Foley check"),
+    ]
+    edges = [
+        {"parent_id": 1, "child_id": 2, "relationship": "is_part_of"},
+        {"parent_id": 2, "child_id": 3, "relationship": "is_part_of"},
+        {"parent_id": 2, "child_id": 4, "relationship": "is_part_of"},
+    ]
+    cards = scoring.compute_container_detail(nodes, edges, 2)  # enter the task
+    assert {c["id"] for c in cards} == {3, 4}
+    assert cards[0]["id"] == 3  # dated subtask sorts first
+
+
+def test_annotate_child_counts_marks_containers():
+    nodes = [make_node(1, node_type="project"), make_node(2), make_node(3)]
+    edges = [
+        {"parent_id": 1, "child_id": 2, "relationship": "is_part_of"},
+        {"parent_id": 2, "child_id": 3, "relationship": "is_part_of"},
+    ]
+    cards = [dict(n) for n in nodes]
+    scoring.annotate_child_counts(cards, nodes, edges)
+    by_id = {c["id"]: c for c in cards}
+    assert by_id[1]["child_count"] == 1   # project → 1 task
+    assert by_id[2]["child_count"] == 1   # task → 1 subtask (a container)
+    assert by_id[3]["child_count"] == 0   # leaf
+
+
+def test_today_excludes_subtasks_but_keeps_the_container():
+    today = datetime.now().date()
+    nodes = [
+        make_node(1, "The Cage", node_type="project"),
+        make_node(2, "Prep for Picture Shop", target_date=today.isoformat()),  # container task, due
+        make_node(3, "Lock credits", target_date=today.isoformat()),           # subtask, due
+    ]
+    edges = [
+        {"parent_id": 1, "child_id": 2, "relationship": "is_part_of"},
+        {"parent_id": 2, "child_id": 3, "relationship": "is_part_of"},
+    ]
+    ids = {c["id"] for c in scoring.compute_today(nodes, edges, now=NOW)}
+    assert 2 in ids       # the container task surfaces in Today
+    assert 3 not in ids   # its subtask does NOT (seen by drilling in)
 
 
 def test_multi_home_task_appears_in_both_project_details():

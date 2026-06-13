@@ -121,12 +121,25 @@ def _finalize(entries: List[Dict[str, Any]], today: date) -> List[Dict[str, Any]
 def compute_today(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
                   now: Optional[datetime] = None) -> List[Dict[str, Any]]:
     """Returns up to MAX_LENS_CARDS qualifying nodes, each annotated with
-    'lens_score' and 'category'. Non-qualifying nodes are excluded entirely."""
+    'lens_score' and 'category'. Non-qualifying nodes are excluded entirely.
+
+    Subtasks (nodes filed under a task, not a project) never appear in Today —
+    they surface inside their parent container. A container task itself still
+    qualifies on its own merit and is shown as an enterable card."""
     now = now or datetime.now(timezone.utc)
     today = datetime.now().date()
 
+    by_id = {n["id"]: n for n in nodes}
+    subtask_ids = {
+        e["child_id"] for e in edges
+        if e["relationship"] == "is_part_of"
+        and (by_id.get(e["parent_id"]) or {}).get("node_type") == "task"
+    }
+
     scored: Dict[int, Dict[str, Any]] = {}
     for node in nodes:
+        if node["id"] in subtask_ids:
+            continue
         deadline = _deadline_score(node, today)
         recency = _recency_score(node, now)
         priority = node.get("priority") or "normal"
@@ -170,16 +183,21 @@ def compute_today(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
 # Entered views — everything, ranked
 # ---------------------------------------------------------------------------
 
-def compute_project_detail(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
-                           project_id: int) -> List[Dict[str, Any]]:
-    """ALL active tasks of one project, most urgent/important first. No cap —
-    entering a project means seeing it whole, like opening it in a PM app."""
+def compute_container_detail(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
+                             parent_id: int) -> List[Dict[str, Any]]:
+    """ALL active children of one container node (a project OR a task with
+    subtasks), most urgent/important first. No cap — entering a container means
+    seeing it whole. Parent-agnostic, so it powers project AND subtask views."""
     today = datetime.now().date()
     child_ids = {e["child_id"] for e in edges
-                 if e["relationship"] == "is_part_of" and e["parent_id"] == project_id}
+                 if e["relationship"] == "is_part_of" and e["parent_id"] == parent_id}
     members = [dict(n) for n in nodes if n["id"] in child_ids]
     members.sort(key=lambda n: _urgency_rank(n, today), reverse=True)
     return _finalize(members, today)
+
+
+# Back-compat alias (project detail is just container detail with a project parent)
+compute_project_detail = compute_container_detail
 
 
 def compute_list(nodes: List[Dict[str, Any]], node_ids: List[int]) -> List[Dict[str, Any]]:
@@ -251,6 +269,20 @@ def compute_projects_overview(nodes: List[Dict[str, Any]],
 # ---------------------------------------------------------------------------
 # Annotation shared by views: which project does each card belong to?
 # ---------------------------------------------------------------------------
+
+def annotate_child_counts(cards: List[Dict[str, Any]], nodes: List[Dict[str, Any]],
+                          edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Tags each card with 'child_count' = its active is_part_of children. A
+    card with child_count > 0 is a container (the UI makes it enterable)."""
+    active_ids = {n["id"] for n in nodes}
+    counts: Dict[int, int] = {}
+    for edge in edges:
+        if edge["relationship"] == "is_part_of" and edge["child_id"] in active_ids:
+            counts[edge["parent_id"]] = counts.get(edge["parent_id"], 0) + 1
+    for card in cards:
+        card["child_count"] = counts.get(card["id"], 0)
+    return cards
+
 
 def annotate_projects(cards: List[Dict[str, Any]], nodes: List[Dict[str, Any]],
                       edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:

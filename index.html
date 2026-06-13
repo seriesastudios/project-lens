@@ -158,9 +158,21 @@
                 body: JSON.stringify(body)
             }).catch(console.error);
 
+        // The view currently on screen — lets cards build the right drill path.
+        let currentView = null;
+
+        // The breadcrumb path to land on when entering a container card.
+        const enterPath = (node) => {
+            if (currentView && currentView.mode === 'node')
+                return [...currentView.breadcrumb.map((b) => b.id), node.id];
+            if (node.node_type === 'project') return [node.id];
+            if (node.project_id) return [node.project_id, node.id];   // task under a project
+            return [node.id];
+        };
+
         const enterNode = (node) => {
             if (node.pseudo === 'loose') return setView({ mode: 'loose' });
-            return setView({ mode: 'project', project_id: node.id });
+            return setView({ mode: 'node', path: enterPath(node) });
         };
 
         const buildCard = (node, index, chipName, clickable) => {
@@ -224,10 +236,21 @@
             }
             el.appendChild(row);
 
-            // Click behavior: project cards navigate; task cards with a
-            // description expand it inline (click again to collapse).
-            if (clickable && isProject) {
+            // Click behavior, in precedence order:
+            //  • container (a project, or any task with subtasks) → navigate in
+            //  • leaf with a description → expand the note inline (the beloved
+            //    expand/contract); click again to collapse
+            //  • plain leaf → nothing
+            const isContainer = isProject || (node.child_count > 0);
+            if (isContainer) {
                 el.classList.add('cursor-pointer');
+                if (!isProject) {
+                    // Task containers get an "· N ▸" enter cue (projects have their badge).
+                    const enter = document.createElement('span');
+                    enter.className = 'text-current opacity-40 ml-1.5 text-xs align-middle';
+                    enter.textContent = `· ${node.child_count} ▸`;
+                    title.appendChild(enter);
+                }
                 el.addEventListener('click', () => enterNode(node));
             } else if (!isProject && node.description) {
                 el.classList.add('cursor-pointer');
@@ -252,23 +275,55 @@
         // Render Cards (all text injected via textContent — never raw HTML)
         const renderNodes = (nodes, view) => {
             nodeContainer.innerHTML = '';
+            currentView = view || { mode: 'today' };
             const mode = view ? view.mode : 'today';
 
-            // View breadcrumb: where you are, and the way back (views are
-            // sticky — they only change when you navigate, by chat or click).
+            // Breadcrumb: where you are and every way back up. Views are sticky —
+            // they only change when you navigate (by chat or click).
             if (view && view.back) {
                 const bar = document.createElement('div');
-                bar.className = 'flex items-center gap-2 px-3 py-2.5 mb-1 bg-orange-50/80 border border-orange-200/60 rounded-xl text-sm text-orange-900 card-enter';
-                const backBtn = document.createElement('button');
-                backBtn.className = 'text-orange-400 hover:text-orange-700 font-semibold px-1.5 transition-colors';
-                backBtn.title = 'Back to Today';
-                backBtn.textContent = '◂';
-                backBtn.addEventListener('click', () => setView({ mode: 'today' }));
-                const label = document.createElement('span');
-                label.className = 'font-medium';
-                label.textContent = `${view.label} · ${view.count} open`;
-                bar.appendChild(backBtn);
-                bar.appendChild(label);
+                bar.className = 'flex items-center flex-wrap gap-x-1.5 gap-y-1 px-3 py-2.5 mb-1 bg-orange-50/80 border border-orange-200/60 rounded-xl text-sm text-orange-900 card-enter';
+
+                const crumb = (text, onClick, isCurrent) => {
+                    if (isCurrent) {
+                        const span = document.createElement('span');
+                        span.className = 'font-semibold';
+                        span.textContent = text;
+                        return span;
+                    }
+                    const b = document.createElement('button');
+                    b.className = 'text-orange-500 hover:text-orange-800 font-medium transition-colors';
+                    b.textContent = text;
+                    b.addEventListener('click', onClick);
+                    return b;
+                };
+                const sep = () => {
+                    const s = document.createElement('span');
+                    s.className = 'text-orange-300';
+                    s.textContent = '▸';
+                    return s;
+                };
+
+                // Root crumb always returns to Today.
+                bar.appendChild(crumb('Today', () => setView({ mode: 'today' }), false));
+                const trail = (view.breadcrumb && view.breadcrumb.length) ? view.breadcrumb : null;
+                if (trail) {
+                    trail.forEach((node, i) => {
+                        bar.appendChild(sep());
+                        const isCurrent = i === trail.length - 1;
+                        bar.appendChild(crumb(node.label,
+                            () => setView({ mode: 'node', path: trail.slice(0, i + 1).map(n => n.id) }),
+                            isCurrent));
+                    });
+                } else {
+                    // Non-node back views (projects / loose / list): one level under Today.
+                    bar.appendChild(sep());
+                    bar.appendChild(crumb(view.label, null, true));
+                }
+                const count = document.createElement('span');
+                count.className = 'text-orange-300 ml-1';
+                count.textContent = `· ${view.count} open`;
+                bar.appendChild(count);
                 nodeContainer.appendChild(bar);
             }
 
@@ -319,7 +374,7 @@
                     const header = document.createElement('div');
                     header.className = 'flex items-baseline justify-between px-2 pt-2 card-enter cursor-pointer group';
                     header.title = `Open ${group.name}`;
-                    header.addEventListener('click', () => setView({ mode: 'project', project_id: group.id }));
+                    header.addEventListener('click', () => setView({ mode: 'node', path: [group.id] }));
                     const name = document.createElement('span');
                     name.className = 'text-[11px] font-semibold uppercase tracking-widest text-gray-400 group-hover:text-orange-500 transition-colors';
                     name.textContent = `${group.name} ▸`;

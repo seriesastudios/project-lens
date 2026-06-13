@@ -107,7 +107,7 @@ def test_open_view_project_resolves_name_and_sets_view():
     assert result["success"]
     assert result["project"] == "Website redesign"
     assert result["open_tasks"] == 1
-    assert views.get_view() == {"mode": "project", "project_id": project}
+    assert views.get_view() == {"mode": "node", "path": [project]}
 
 
 def test_open_view_unknown_project_errors_with_guidance():
@@ -292,6 +292,22 @@ def test_capture_and_update_priority():
         "node_id": node_id, "priority": "urgent-ish"
     })))
     assert "error" in result
+
+
+def test_capture_subtasks_under_an_existing_task():
+    # parent_id may be any task, so capture files new items as its subtasks.
+    parent = models.add_node("Prep for Picture Shop")
+    result = json.loads(execute_tool_call(fake_call("capture_tasks", {
+        "tasks": [
+            {"content": "Lock credits", "parent_id": parent},
+            {"content": "Foley check", "parent_id": parent},
+        ]
+    })))
+    assert result["success"]
+    child_ids = models.get_active_child_ids(parent)
+    assert len(child_ids) == 2
+    contents = {models.get_node(c)["content"] for c in child_ids}
+    assert contents == {"Lock credits", "Foley check"}
 
 
 def test_update_task_attaches_description():
