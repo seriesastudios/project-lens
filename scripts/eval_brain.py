@@ -166,6 +166,8 @@ def build_cases(ids):
          expect_tool("open_view", lambda a: True if a["view"] == "project" and "website" in (a.get("project_name") or "").lower() else f"args {a}")),
         ("what to work on", "what should I be working on right now?",
          expect_tool("open_view", lambda a: True if a["view"] in ("today", "projects") else f"args {a}")),
+        ("urgent-this-week opens a view, not a chat list", "what are the most urgent tasks in the coming week?",
+         expect_tool("open_view", lambda a: True if a["view"] in ("today", "list") else f"args {a}")),
         ("category query becomes a list view", "what are my errands?",
          expect_tool("open_view", lambda a: True if a["view"] == "list" and a.get("node_ids") else f"args {a}")),
         ("what's-left query opens project view", "what's left to do on the website redesign?",
