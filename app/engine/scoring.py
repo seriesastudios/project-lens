@@ -220,6 +220,39 @@ def compute_loose_tasks(nodes: List[Dict[str, Any]],
     return _finalize(members, today)
 
 
+def compute_filter(filter_name: str, nodes: List[Dict[str, Any]],
+                   edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """A named, Python-computed filter view. `nodes` is the candidate set the
+    caller already fetched for this filter (active / on_hold / completed); the
+    model only ever names the filter, never the members.
+
+    - overdue: active tasks past their deadline, most overdue first
+    - high:    high-priority items
+    - waiting: shelved (on_hold) items, as passed in
+    - done:    recently completed items, newest first, flagged read-only
+    """
+    today = datetime.now().date()
+
+    if filter_name == "overdue":
+        members = [dict(n) for n in nodes
+                   if n.get("node_type") != "project"
+                   and (_parse_deadline(n.get("target_date")) or today) < today]
+    elif filter_name == "high":
+        members = [dict(n) for n in nodes if (n.get("priority") or "normal") == "high"]
+    elif filter_name in ("waiting", "done"):
+        members = [dict(n) for n in nodes]
+    else:
+        return []
+
+    if filter_name == "done":
+        for member in members:           # preserve newest-first; mark read-only
+            member["done"] = True
+        return _finalize(members, today)
+
+    members.sort(key=lambda n: _urgency_rank(n, today), reverse=True)
+    return _finalize(members, today)
+
+
 def compute_projects_overview(nodes: List[Dict[str, Any]],
                               edges: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """Every active project as a card: open-task count and the nearest deadline

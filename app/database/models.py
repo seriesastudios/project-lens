@@ -268,6 +268,25 @@ def get_active_nodes(limit: Optional[int] = None) -> List[Dict[str, Any]]:
         return [dict(row) for row in conn.execute(query).fetchall()]
 
 
+def get_nodes_by_status(status: str) -> List[Dict[str, Any]]:
+    """All nodes in a given status (e.g. 'on_hold'). The Lens normally shows
+    only active nodes; filter views use this to surface shelved work on demand."""
+    with DatabaseSession() as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM nodes WHERE status = ? ORDER BY created_at ASC", (status,)
+        ).fetchall()]
+
+
+def get_recently_completed(days: int = 7) -> List[Dict[str, Any]]:
+    """Nodes completed within the last `days`, newest first — for the 'done' view."""
+    with DatabaseSession() as conn:
+        return [dict(row) for row in conn.execute(
+            "SELECT * FROM nodes WHERE status = 'completed' "
+            "AND completed_at >= datetime('now', ?) ORDER BY completed_at DESC",
+            (f"-{int(days)} days",)
+        ).fetchall()]
+
+
 # Generic words that would make every task a "match" in an OR query
 _STOPWORDS = {
     "the", "a", "an", "and", "or", "of", "to", "in", "on", "for", "at", "is",

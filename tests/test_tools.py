@@ -525,3 +525,38 @@ def test_template_confirmation_link():
                         "relationship": "blocks"})
     ])
     assert text == "Noted: **Finish mockups** blocks **Build page**."
+
+
+def test_open_view_filter_modes_set_view_and_seed():
+    from app.engine import views
+    models.add_node("very overdue", target_date="2020-01-01")
+    for f in ("overdue", "high", "waiting", "done"):
+        result = json.loads(execute_tool_call(fake_call("open_view", {"view": "filter", "filter": f})))
+        assert result["success"] and result["filter"] == f
+        assert views.get_view() == {"mode": "filter", "filter": f}
+
+
+def test_open_view_loose_sets_view():
+    from app.engine import views
+    result = json.loads(execute_tool_call(fake_call("open_view", {"view": "loose"})))
+    assert result["success"] and result["view"] == "loose"
+    assert views.get_view() == {"mode": "loose"}
+
+
+def test_open_view_filter_requires_a_filter_name():
+    assert "error" in json.loads(execute_tool_call(fake_call("open_view", {"view": "filter"})))
+    assert "error" in json.loads(execute_tool_call(
+        fake_call("open_view", {"view": "filter", "filter": "nonsense"})))
+
+
+def test_filter_and_loose_confirmations():
+    from app.engine.brain import template_confirmation
+    assert template_confirmation([
+        ("open_view", {"success": True, "view": "filter", "filter": "overdue", "shown": 2})
+    ]) == "Showing **overdue** — 2 tasks."
+    assert template_confirmation([
+        ("open_view", {"success": True, "view": "filter", "filter": "done", "shown": 1})
+    ]) == "Showing **recently completed** — 1 task."
+    assert template_confirmation([
+        ("open_view", {"success": True, "view": "loose", "shown": 3})
+    ]) == "Showing your **loose tasks** — 3 tasks."

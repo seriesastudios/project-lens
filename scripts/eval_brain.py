@@ -35,6 +35,8 @@ def seed_tasks():
     models.add_edge(website, mockups, "is_part_of")
     models.add_edge(website, landing, "is_part_of")
     models.add_edge(mockups, landing, "blocks")
+    # Filter-view cases route on the user's PHRASING (rule 6), not on seeing the
+    # tasks, so the seed stays minimal — no need to plant overdue/on-hold/done rows.
     return {"website": website, "marketing": marketing, "mockups": mockups,
             "landing": landing, "invoices": invoices, "dentist": dentist,
             "groceries": groceries}
@@ -124,6 +126,17 @@ def build_cases(ids):
         mutating = [t for t, _ in calls if t != "search_tasks"]
         return True if not mutating else f"expected no action, got {mutating}"
 
+    def expect_done_view_no_mutation(calls, text):
+        # "what did I finish?" must SHOW completed work, never mark anything done
+        completed = [t for t, _ in calls if t == "complete_tasks"]
+        if completed:
+            return f"mutated data on a read-only query: called {completed}"
+        opened = [a for t, a in calls if t == "open_view"
+                  and a.get("view") == "filter" and a.get("filter") == "done"]
+        if not opened:
+            return f"expected open_view filter done, got {[t for t, _ in calls] or text[:50]!r}"
+        return True
+
     def expect_promote_with_tasks(calls, text):
         # two-step: flip landing page to a project AND file the named tasks under it
         promoted = [a for t, a in calls if t == "update_task"
@@ -166,8 +179,22 @@ def build_cases(ids):
          expect_tool("open_view", lambda a: True if a["view"] == "project" and "website" in (a.get("project_name") or "").lower() else f"args {a}")),
         ("what to work on", "what should I be working on right now?",
          expect_tool("open_view", lambda a: True if a["view"] in ("today", "projects") else f"args {a}")),
+        # "most urgent this week" is genuinely ambiguous (deadline-urgency vs
+        # importance); any urgency/priority NAVIGATION is acceptable — the bug we
+        # guard is answering in a chat list instead of moving the Lens.
         ("urgent-this-week opens a view, not a chat list", "what are the most urgent tasks in the coming week?",
-         expect_tool("open_view", lambda a: True if a["view"] in ("today", "list") else f"args {a}")),
+         expect_tool("open_view", lambda a: True if a["view"] in ("today", "list")
+                     or (a["view"] == "filter" and a.get("filter") in ("high", "overdue")) else f"args {a}")),
+        ("overdue filter", "what's overdue right now?",
+         expect_tool("open_view", lambda a: True if a["view"] == "filter" and a.get("filter") == "overdue" else f"args {a}")),
+        ("high-priority filter", "show me everything that's high priority",
+         expect_tool("open_view", lambda a: True if a["view"] == "filter" and a.get("filter") == "high" else f"args {a}")),
+        ("waiting filter", "what am I waiting on?",
+         expect_tool("open_view", lambda a: True if a["view"] == "filter" and a.get("filter") == "waiting" else f"args {a}")),
+        ("done view is read-only", "what did I get done this week?",
+         expect_done_view_no_mutation),
+        ("loose tasks navigation", "show me the tasks that aren't in any project",
+         expect_tool("open_view", lambda a: True if a["view"] in ("loose", "list") else f"args {a}")),
         ("category query becomes a list view", "what are my errands?",
          expect_tool("open_view", lambda a: True if a["view"] == "list" and a.get("node_ids") else f"args {a}")),
         ("what's-left query opens project view", "what's left to do on the website redesign?",

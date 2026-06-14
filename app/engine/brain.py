@@ -158,12 +158,14 @@ RULES
 1. The user mentions new work, a goal, or a commitment → call capture_tasks with EVERY distinct task in the message. A project with steps → one item with node_type "project" and the steps in subtasks. Set parent_id when it clearly belongs to an existing item — parent_id may be ANY existing task, not just a project, so "add X and Y under <task>" or "as subtasks of <task>" files them as that task's subtasks. If they signal importance about the NEW work ("critical", "really important", "must do") set priority "high" on it ("no rush"/"whenever" → "low") — still capture_tasks, never update_task. Never capture anything already in ACTIVE TASKS.
 2. Deadlines: pass the deadline exactly as the user said it ("Friday", "end of month", "June 3") or as YYYY-MM-DD — the system converts relative dates itself. No date stated or implied → omit the field, never invent one.
 3. The user finished something → call complete_tasks with ALL matching IDs from ACTIVE TASKS, in one call. Match loosely: "sent the invoices" matches "Send invoices to clients". Never create a task for finished work; if nothing matches, ask one short question.
-4. Reword, change deadline, change importance, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change. update_task is for tasks that ALREADY EXIST in ACTIVE TASKS. Importance words about an existing task ("X is critical" → priority high; "X is low priority, no rush" → low). Set priority ONLY when the user signals it — never infer it. PROMOTE an existing task to a project ("make X its own project", "I want X to be its own project with A, B, C", "turn X into a project") → in the SAME turn: (1) call update_task on X with node_type "project"; (2) if they name new tasks A, B, C, call capture_tasks for them with parent_id = X's id. If X isn't in ACTIVE TASKS, search_tasks for it first.
+4. Reword, change deadline, change importance, pause (on_hold), resume (active), or archive (cold_storage) → call update_task with only the fields that change. update_task is for tasks that ALREADY EXIST in ACTIVE TASKS. Importance words about an existing task ("X is critical" → priority high; "X is low priority, no rush" → low). Set priority ONLY when the user signals it — never infer it. PROMOTE an existing task to a project ("make X its own project", "I want X to be its own project with A, B, C", "turn X into a project") → in the SAME turn, BOTH: (1) call update_task on X with node_type "project"; AND (2) if they name new tasks A, B, C, you MUST also call capture_tasks for them with parent_id = X's id — promoting without filing the named tasks is incomplete. If X isn't in ACTIVE TASKS, search_tasks for it first.
 5. A dependency or grouping is stated → call link_tasks. The BLOCKER is always parent_id: "X blocks Y" → X is parent_id; "Y is blocked by X" → X is still parent_id. Use is_part_of for project/subtask grouping. RELOCATE an existing task ("move X to Y", "file X under Y instead", "put X in Y") → call move_task — it pulls X out of its current project and refiles it. Pass to_project_name for a project destination, or new_parent_id to file X under another task. Reserve link_tasks (is_part_of) for "X is ALSO part of Y" (keep both homes). If X (or an ID destination) isn't in ACTIVE TASKS, search_tasks first.
 6. ANY request to see tasks is NAVIGATION — call open_view, never answer with a text list:
    - "focus on X" / "let's work on X" / "open X" / "what's left on X" / "where am I on X" → open_view {"view": "project", "project_name": "X"}. Pass the project's name as the user said it — the system finds the project and shows ALL its open tasks itself. Do NOT pass node_ids and do NOT search first.
    - "what are my projects" / "show my projects" / "what's on my plate" → open_view {"view": "projects"}.
-   - "what should I work on" / "show today" / "what's urgent" / "what's most urgent" / "what's due this week" / "what's coming up" / "what are the urgent ones" / "go back" / "clear the lens" → open_view {"view": "today"} (Today IS the urgent/this-week view — never answer these in chat).
+   - "what should I work on" / "show today" / "what's urgent" / "what's most urgent" / "what's due this week" / "what's coming up" / "what are the urgent ones" / "go back" / "clear the lens" → open_view {"view": "today"} (Today IS the urgent/this-week view, ranked by DEADLINE — never answer these in chat). "Urgent" and "due soon" mean Today, NOT the high-priority filter.
+   - Filter views → open_view {"view": "filter", "filter": F}: overdue ("overdue"/"late"/"what did I miss"); high ("high priority"/"flagged"/"important" — by importance, NOT "urgent"); waiting ("waiting on"/"on hold"/"paused"); done ("what did I finish/get done" — SHOW completed work, NEVER call complete_tasks for it).
+   - "tasks with no project" / "unfiled" / "loose tasks" → open_view {"view": "loose"}.
    - Category words ("errands", "chores", "admin"): judge which ACTIVE TASKS fit (search_tasks first if needed) → open_view {"view": "list", "node_ids": [...], "label": "errands"}.
    EXCEPTION — a question about ONE specific named task ("when is the dentist due?", "what's the status of the op-ed?", "is the report done yet?") is NOT navigation: answer it in one plain sentence from ACTIVE TASKS, do NOT call open_view. This exception is ONLY for a single named task. A question about a SET of tasks ("what's urgent", "what's due soon", "which ones are high priority", "what are the most urgent tasks this week") is navigation — open_view, never a chat list.
    NEVER list tasks in chat, and never say the Lens shows something unless you called open_view this turn.
@@ -472,12 +474,21 @@ class OpenViewArgs(BaseModel):
     project_name: Optional[str] = None
     node_ids: Optional[List[int]] = None
     label: Optional[str] = None
+    filter: Optional[str] = None
 
     @field_validator("view")
     @classmethod
     def check_view(cls, value):
-        if value not in ("today", "projects", "project", "list", "loose"):
-            raise ValueError("view must be one of: today, projects, project, list")
+        if value not in ("today", "projects", "project", "list", "loose", "filter"):
+            raise ValueError("view must be one of: today, projects, project, list, loose, filter")
+        return value
+
+    @field_validator("filter")
+    @classmethod
+    def check_filter(cls, value):
+        from app.engine import views
+        if value is not None and value not in views.VALID_FILTERS:
+            raise ValueError(f"filter must be one of {views.VALID_FILTERS}")
         return value
 
     @model_validator(mode="after")
@@ -486,6 +497,8 @@ class OpenViewArgs(BaseModel):
             raise ValueError("view 'project' requires project_name (the project as the user named it)")
         if self.view == "list" and not self.node_ids:
             raise ValueError("view 'list' requires node_ids (IDs from ACTIVE TASKS or search results)")
+        if self.view == "filter" and not self.filter:
+            raise ValueError("view 'filter' requires filter (one of: overdue, high, waiting, done)")
         return self
 
 
@@ -593,14 +606,15 @@ LENS_TOOLS: Any = [
         "type": "function",
         "function": {
             "name": "open_view",
-            "description": "Navigate the Lens pane, like clicking around a project manager app. 'project' opens one project and shows ALL its open tasks — pass project_name as the user said it, the system finds it. 'projects' shows the all-projects overview. 'today' returns to the default most-urgent view (also for 'go back' / 'clear'). 'list' shows specific tasks by ID (for category requests, after picking IDs).",
+            "description": "Navigate the Lens pane, like clicking around a project manager app. 'project' opens one project and shows ALL its open tasks — pass project_name as the user said it, the system finds it. 'projects' shows the all-projects overview. 'today' returns to the default most-urgent view (also for 'go back' / 'clear'). 'loose' shows tasks that belong to no project. 'filter' shows a computed set (pass the 'filter' field): overdue, high (priority), waiting (on hold), done (recently completed). 'list' shows specific tasks by ID (for category requests, after picking IDs).",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "view": {"type": "string", "enum": ["today", "projects", "project", "list"], "description": "Which view to open."},
+                    "view": {"type": "string", "enum": ["today", "projects", "project", "list", "loose", "filter"], "description": "Which view to open."},
                     "project_name": {"type": "string", "description": "For view 'project': the project's name as the user referred to it (e.g. 'The Cage')."},
                     "node_ids": {"type": "array", "items": {"type": "integer"}, "description": "For view 'list': the task IDs to show."},
-                    "label": {"type": "string", "description": "For view 'list': a short title, e.g. 'errands'."}
+                    "label": {"type": "string", "description": "For view 'list': a short title, e.g. 'errands'."},
+                    "filter": {"type": "string", "enum": ["overdue", "high", "waiting", "done"], "description": "For view 'filter': overdue = past-due tasks; high = high-priority; waiting = on-hold/paused; done = recently completed (a read-only review — NEVER complete tasks to answer 'what did I finish')."}
                 },
                 "required": ["view"]
             }
@@ -698,6 +712,10 @@ def _execute_update(args: UpdateTaskArgs) -> dict:
     # that filed it under its old project(s); its own subtasks come along.
     if args.node_type == "project":
         result["detached"] = models.detach_parents(args.node_id)
+        # Targeted nudge (only seen mid-promotion, so it doesn't bloat the prompt):
+        # the 4B sometimes stops after the flip and forgets the named tasks.
+        result["next"] = (f"If the user named tasks for this new project, file them NOW: "
+                          f"call capture_tasks with parent_id = {args.node_id}.")
     changed = {k: v for k, v in (("content", args.content), ("status", args.status),
                                  ("deadline", args.deadline), ("priority", args.priority),
                                  ("description", args.description), ("node_type", args.node_type))
@@ -778,11 +796,21 @@ def _execute_open_view(args: OpenViewArgs) -> dict:
         return {"success": True, "view": "list", "label": args.label or "selected tasks",
                 "shown": len(active)}
 
-    views.set_view({"mode": args.view})
+    if args.view == "filter":
+        views.set_view({"mode": "filter", "filter": args.filter})
+        cards = views.compute_view_cards()["cards"]
+        for card in cards:
+            if card.get("id") is not None:
+                seen_node_ids.add(card["id"])
+        return {"success": True, "view": "filter", "filter": args.filter, "shown": len(cards)}
+
+    views.set_view({"mode": args.view})  # today / projects / loose
     result = {"success": True, "view": args.view}
     if args.view == "projects":
         result["project_count"] = sum(
             1 for n in models.get_active_nodes() if n.get("node_type") == "project")
+    elif args.view == "loose":
+        result["shown"] = len(views.compute_view_cards()["cards"])
     return result
 
 
@@ -955,6 +983,16 @@ def _confirmation_sentences(name: str, result: dict) -> Optional[List[str]]:
             count = result.get("shown", 0)
             plural = "task" if count == 1 else "tasks"
             sentences.append(f"Showing **{result.get('label', 'selection')}** — {count} {plural}.")
+        elif view == "loose":
+            count = result.get("shown", 0)
+            plural = "task" if count == 1 else "tasks"
+            sentences.append(f"Showing your **loose tasks** — {count} {plural}.")
+        elif view == "filter":
+            count = result.get("shown", 0)
+            label = {"overdue": "overdue", "high": "high-priority",
+                     "waiting": "on-hold", "done": "recently completed"}.get(result.get("filter"), "filtered")
+            plural = "task" if count == 1 else "tasks"
+            sentences.append(f"Showing **{label}** — {count} {plural}.")
         else:
             sentences.append("Here's your day.")
 

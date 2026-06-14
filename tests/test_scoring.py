@@ -320,3 +320,43 @@ def test_project_card_suppressed_when_its_tasks_are_visible():
     assert task in ids
     assert project not in ids       # header represents it; card would be noise
     assert lonely in ids            # sole representation of its project stays
+
+
+# ---------------------------------------------------------------------------
+# Filter views (overdue / high / waiting / done)
+# ---------------------------------------------------------------------------
+
+def _rel_date(days):
+    return (datetime.now().date() + timedelta(days=days)).isoformat()
+
+
+def test_compute_filter_overdue_only_past_dated_non_projects():
+    nodes = [
+        make_node(1, "late task", target_date=_rel_date(-3)),
+        make_node(2, "future task", target_date=_rel_date(5)),
+        make_node(3, "undated task"),
+        make_node(4, "old project", target_date=_rel_date(-2), node_type="project"),
+    ]
+    out = scoring.compute_filter("overdue", nodes, [])
+    assert [n["id"] for n in out] == [1]
+
+
+def test_compute_filter_high_only_high_priority():
+    nodes = [make_node(1, priority="high"), make_node(2, priority="normal"),
+             make_node(3, priority="low"),
+             make_node(4, "proj", node_type="project", priority="high")]
+    out = scoring.compute_filter("high", nodes, [])
+    assert {n["id"] for n in out} == {1, 4}
+
+
+def test_compute_filter_waiting_returns_passed_set():
+    nodes = [make_node(1, status="on_hold"), make_node(2, status="on_hold")]
+    out = scoring.compute_filter("waiting", nodes, [])
+    assert {n["id"] for n in out} == {1, 2}
+
+
+def test_compute_filter_done_flags_read_only():
+    nodes = [make_node(1, status="completed"), make_node(2, status="completed")]
+    out = scoring.compute_filter("done", nodes, [])
+    assert {n["id"] for n in out} == {1, 2}
+    assert all(n["done"] for n in out)

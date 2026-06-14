@@ -24,7 +24,8 @@ from app.engine import scoring
 
 VIEW_STATE_KEY = "view"
 DEFAULT_VIEW: Dict[str, Any] = {"mode": "today"}
-VALID_MODES = ("today", "projects", "node", "list", "loose")
+VALID_MODES = ("today", "projects", "node", "list", "loose", "filter")
+VALID_FILTERS = ("overdue", "high", "waiting", "done")
 
 
 def _valid(view: Any) -> bool:
@@ -38,6 +39,8 @@ def _valid(view: Any) -> bool:
         ids = view.get("node_ids")
         if not isinstance(ids, list) or not all(isinstance(i, int) for i in ids):
             return False
+    if view["mode"] == "filter" and view.get("filter") not in VALID_FILTERS:
+        return False
     return True
 
 
@@ -122,6 +125,9 @@ def view_meta(view: Dict[str, Any], cards: List[Dict[str, Any]]) -> Dict[str, An
         label = breadcrumb[-1]["label"] if breadcrumb else "?"
     elif mode == "loose":
         label = "Loose tasks"
+    elif mode == "filter":
+        label = {"overdue": "Overdue", "high": "High priority",
+                 "waiting": "Waiting on", "done": "Done this week"}.get(view.get("filter"), "Filtered")
     else:
         label = view.get("label") or "Selection"
     return {"mode": mode, "label": label, "breadcrumb": breadcrumb,
@@ -149,6 +155,16 @@ def compute_view_cards() -> Dict[str, Any]:
         cards = scoring.annotate_projects(cards, nodes, edges)
     elif view["mode"] == "loose":
         cards = scoring.compute_loose_tasks(nodes, edges)
+    elif view["mode"] == "filter":
+        name = view["filter"]
+        if name == "waiting":
+            candidates = models.get_nodes_by_status("on_hold")
+        elif name == "done":
+            candidates = models.get_recently_completed()
+        else:  # overdue / high — drawn from the active set
+            candidates = nodes
+        cards = scoring.compute_filter(name, candidates, edges)
+        cards = scoring.annotate_projects(cards, nodes, edges)
     elif view["mode"] == "list":
         cards = scoring.compute_list(nodes, view["node_ids"])
         cards = scoring.annotate_projects(cards, nodes, edges)

@@ -102,3 +102,28 @@ def test_detach_parents_removes_only_is_part_of_edges():
     assert (project, wayfinder, "is_part_of") not in rels
     assert (blocker, wayfinder, "blocks") in rels
     assert (wayfinder, child, "is_part_of") in rels
+
+
+def test_get_nodes_by_status_on_hold():
+    models.add_node("active one")
+    held = models.add_node("held one")
+    models.update_node(held, status="on_hold")
+    result = models.get_nodes_by_status("on_hold")
+    assert [n["id"] for n in result] == [held]
+
+
+def test_get_recently_completed_includes_recent_excludes_active():
+    done = models.add_node("finished recently")
+    models.complete_nodes([done])
+    active = models.add_node("still going")
+    ids = {n["id"] for n in models.get_recently_completed()}
+    assert done in ids
+    assert active not in ids
+
+
+def test_get_recently_completed_excludes_old():
+    old = models.add_node("done long ago")
+    models.complete_nodes([old])
+    with models.DatabaseSession() as conn:
+        conn.execute("UPDATE nodes SET completed_at = datetime('now', '-30 days') WHERE id = ?", (old,))
+    assert old not in {n["id"] for n in models.get_recently_completed()}

@@ -171,3 +171,54 @@ def test_view_member_ids_for_context():
     assert set(views.view_member_ids()) == {project, *children}
     views.set_view({"mode": "today"})
     assert views.view_member_ids() == []
+
+
+# ---------------------------------------------------------------------------
+# Filter views
+# ---------------------------------------------------------------------------
+
+def test_filter_view_overdue_shows_only_past_dated():
+    models.add_node("late thing", target_date=today_plus(-5))
+    models.add_node("future thing", target_date=today_plus(5))
+    views.set_view({"mode": "filter", "filter": "overdue"})
+    out = views.compute_view_cards()
+    assert out["view"]["label"] == "Overdue"
+    contents = {c["content"] for c in out["cards"]}
+    assert "late thing" in contents
+    assert "future thing" not in contents
+
+
+def test_filter_view_waiting_reads_on_hold():
+    held = models.add_node("parked task")
+    models.update_node(held, status="on_hold")
+    views.set_view({"mode": "filter", "filter": "waiting"})
+    out = views.compute_view_cards()
+    assert out["view"]["label"] == "Waiting on"
+    assert any(c["content"] == "parked task" for c in out["cards"])
+
+
+def test_filter_view_done_reads_completed_and_flags_them():
+    d = models.add_node("did this one")
+    models.complete_nodes([d])
+    views.set_view({"mode": "filter", "filter": "done"})
+    out = views.compute_view_cards()
+    assert out["view"]["label"] == "Done this week"
+    card = next(c for c in out["cards"] if c["content"] == "did this one")
+    assert card.get("done") is True
+
+
+def test_filter_view_high_priority():
+    models.add_node("flagged", priority="high")
+    models.add_node("ordinary")
+    views.set_view({"mode": "filter", "filter": "high"})
+    out = views.compute_view_cards()
+    assert out["view"]["label"] == "High priority"
+    contents = {c["content"] for c in out["cards"]}
+    assert "flagged" in contents and "ordinary" not in contents
+
+
+def test_empty_filter_view_renders_cleanly():
+    views.set_view({"mode": "filter", "filter": "overdue"})
+    out = views.compute_view_cards()
+    assert out["cards"] == []
+    assert out["view"]["label"] == "Overdue"

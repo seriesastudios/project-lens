@@ -211,6 +211,14 @@
             title.className = isProject
                 ? 'text-[15px] font-semibold leading-snug tracking-tight'
                 : 'text-[15px] font-medium leading-snug tracking-tight';
+            if (node.done) {
+                el.classList.add('opacity-60');
+                const check = document.createElement('span');
+                check.className = 'text-green-600 mr-1.5';
+                check.textContent = '✓';
+                title.appendChild(check);
+                title.classList.add('line-through', 'decoration-current/40');
+            }
             title.appendChild(document.createTextNode(node.content));
             body.appendChild(title);
 
@@ -223,7 +231,7 @@
             }
 
             row.appendChild(body);
-            if (!isProject) {
+            if (!isProject && !node.done) {
                 const actions = document.createElement('div');
                 actions.className = 'flex-shrink-0';
                 const doneBtn = document.createElement('button');
@@ -242,7 +250,9 @@
             //    expand/contract); click again to collapse
             //  • plain leaf → nothing
             const isContainer = isProject || (node.child_count > 0);
-            if (isContainer) {
+            if (node.done) {
+                // Completed cards are a read-only review — no enter, no expand.
+            } else if (isContainer) {
                 el.classList.add('cursor-pointer');
                 if (!isProject) {
                     // Task containers get an "· N ▸" enter cue (projects have their badge).
