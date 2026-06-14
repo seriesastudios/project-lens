@@ -374,27 +374,13 @@
                 return;
             }
 
-            // Today: cluster cards by project, preserving score order between
-            // groups. Every card carries its project as a clickable chip — one
-            // consistent label whether a project shows one task or several.
-            const groups = [];
-            const byKey = {};
-            nodes.forEach((node) => {
-                const key = node.project_id ? `p${node.project_id}` : `s${node.id}`;
-                if (!byKey[key]) {
-                    byKey[key] = { id: node.project_id, name: node.project_name, total: node.project_open_total, cards: [] };
-                    groups.push(byKey[key]);
-                }
-                byKey[key].cards.push(node);
-            });
-
-            let index = 0;
-            groups.forEach((group) => {
-                group.cards.forEach((node) => {
-                    nodeContainer.appendChild(buildCard(node, index, group.name,
-                                                        node.node_type === 'project'));
-                    index += 1;
-                });
+            // Today: render in the order the engine ranked them — deadline-led
+            // urgency, with priority/blocker nudges. No project clustering: each
+            // card carries its project as a clickable chip, so the list stays in
+            // true urgency order instead of being reshuffled to group projects.
+            nodes.forEach((node, index) => {
+                nodeContainer.appendChild(buildCard(node, index, node.project_name,
+                                                    node.node_type === 'project'));
             });
         };
 

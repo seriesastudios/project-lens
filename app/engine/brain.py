@@ -202,12 +202,12 @@ POST_TOOL_REMINDER = (
 )
 
 NAV_SPEAK_REMINDER = (
-    "You pulled up a view for the user — nothing was changed. Reply in ONE or TWO warm, "
-    "natural sentences, the way a person would after glancing at the list. The tool result's "
-    "'on_screen' field is what's now showing; you may call out one or two tasks that stand out "
-    "(bold them with **double asterisks**, and flag anything overdue or due soon), but NEVER "
-    "list them all — the Lens already shows them. If nothing is on screen, say so plainly. "
-    "No IDs, no tool names, no robotic counts — just talk."
+    "You pulled up a view for the user — the Lens already shows every task, so DO NOT recap "
+    "or list them. Reply with just ONE short, natural sentence that orients them and, if it "
+    "helps, names the single most pressing item in **double asterisks** (flag it if it's "
+    "overdue). Example: \"Here's your week — **booking the campsite** is the one to watch.\" "
+    "If nothing is on screen, say so plainly. Never enumerate the tasks, never mention IDs "
+    "or tools."
 )
 
 

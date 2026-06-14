@@ -91,6 +91,18 @@ def test_high_priority_outranks_normal_with_same_deadline():
     assert [e["id"] for e in lens] == [2, 1]
 
 
+def test_today_displays_in_deadline_order_regardless_of_priority():
+    # lens_score decides what qualifies, but the DISPLAYED order is by deadline:
+    # a sooner normal task sits above a later high-priority one, and undated
+    # qualifying work (here, the high-priority item) trails everything dated.
+    today = datetime.now().date()
+    soon_normal = make_node(1, target_date=(today + timedelta(days=1)).isoformat())
+    later_high = make_node(2, target_date=(today + timedelta(days=5)).isoformat(), priority="high")
+    undated_high = make_node(3, priority="high")
+    lens = scoring.compute_today([later_high, undated_high, soon_normal], [], now=NOW)
+    assert [e["id"] for e in lens] == [1, 2, 3]
+
+
 def test_high_priority_qualifies_without_deadline():
     important = make_node(1, priority="high")
     plain = make_node(2)

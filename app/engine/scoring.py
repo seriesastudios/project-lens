@@ -109,7 +109,7 @@ def _categorize(entry: Dict[str, Any], today: date) -> str:
 def _finalize(entries: List[Dict[str, Any]], today: date) -> List[Dict[str, Any]]:
     for entry in entries:
         entry["category"] = _categorize(entry, today)
-        for key in ("_deadline", "_qualifies", "_blocker"):
+        for key in ("_deadline", "_qualifies", "_blocker", "_sort_date"):
             entry.pop(key, None)
     return entries
 
@@ -173,10 +173,27 @@ def compute_today(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
                     blocker["_qualifies"] = True
                     blocker["lens_score"] = blocked["lens_score"] + 0.5
                     blocker["_blocker"] = True
+                    # A blocker inherits the deadline of what it gates, so it
+                    # sorts right beside it even when it has no date of its own.
+                    blocker["_sort_date"] = (blocker.get("_sort_date")
+                                             or blocked.get("target_date")
+                                             or blocked.get("_sort_date"))
 
+    # lens_score decides what EARNS a Today slot (so high-priority and recently
+    # captured work surfaces even when undated); the displayed order is then by
+    # DEADLINE — soonest/overdue first — which is how people scan "this week".
     qualifying = [entry for entry in scored.values() if entry["_qualifies"]]
     qualifying.sort(key=lambda entry: entry["lens_score"], reverse=True)
-    return _finalize(qualifying[:MAX_LENS_CARDS], today)
+    shown = qualifying[:MAX_LENS_CARDS]
+
+    def _by_deadline(entry):
+        deadline = _parse_deadline(entry.get("target_date") or entry.get("_sort_date"))
+        if deadline is None:
+            return (1, 0, -entry["lens_score"])  # undated work trails dated, by score
+        return (0, (deadline - today).days, -entry["lens_score"])  # overdue → soonest first
+
+    shown.sort(key=_by_deadline)
+    return _finalize(shown, today)
 
 
 # ---------------------------------------------------------------------------
