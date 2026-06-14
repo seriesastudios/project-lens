@@ -257,7 +257,7 @@ def select_context_tasks(active_nodes: List[dict], conversation_text: str,
             matched.append(node)
         elif deadline is not None and (deadline - today).days <= scoring.DEADLINE_WINDOW_DAYS:
             due_soon.append(node)
-        elif scoring._recency_score(node, now) > 0:
+        elif scoring._recently_captured(node, now):
             recent.append(node)
 
     # Recent captures are a courtesy (FTS on the conversation usually re-finds

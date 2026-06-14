@@ -14,15 +14,13 @@ from typing import List, Dict, Any, Optional
 MAX_LENS_CARDS = 7            # Today view only; entered views show everything
 
 DEADLINE_WINDOW_DAYS = 7      # deadlines further out than this don't qualify on their own
+IMMINENT_DAYS = 2             # low-priority work needs a deadline at least this close
 RECENT_CAPTURE_HOURS = 2.0    # just-captured items stay visible briefly
-RECENT_CAPTURE_SCORE = 4.0
 
-# Importance is independent of urgency: a high-priority task qualifies for the
-# Today view even without a deadline, and outranks a same-deadline normal
-# task; low-priority tasks need an imminent deadline to take a Today slot.
-PRIORITY_BONUS = {"high": 3.0, "normal": 0.0, "low": 0.0}
-PRIORITY_MULTIPLIER = {"high": 1.5, "normal": 1.0, "low": 0.5}
-IMMINENT_DEADLINE_SCORE = 7.0  # deadline part of the scale at ~2 days out
+# Importance is independent of urgency: it never changes the displayed ORDER
+# (that's always deadline-first), only two things — whether undated/low work
+# earns a Today slot, and the tiebreak when two cards share a deadline.
+_PRIORITY_RANK = {"high": 2, "normal": 1, "low": 0}
 
 # Card categories encode URGENCY (the wash color answers "when is this due?").
 # Priority is the edge stripe — independent channels.
@@ -54,41 +52,61 @@ def _parse_deadline(value: Optional[str]) -> Optional[date]:
         return None
 
 
-def _deadline_score(node: Dict[str, Any], today: date) -> float:
-    """0 outside the window; 3..9 inside, rising as the deadline approaches."""
-    deadline = _parse_deadline(node.get("target_date"))
-    if deadline is None:
-        return 0.0
-    days_left = (deadline - today).days
-    if days_left < 0:
-        return 9.0  # overdue
-    if days_left > DEADLINE_WINDOW_DAYS:
-        return 0.0
-    return 9.0 - (days_left / DEADLINE_WINDOW_DAYS) * 6.0
-
-
-def _recency_score(node: Dict[str, Any], now: datetime) -> float:
+def _recently_captured(node: Dict[str, Any], now: datetime) -> bool:
+    """True for the first couple of hours after capture, so a just-added task
+    is briefly visible in Today even before it has a deadline."""
     created = _parse_db_timestamp(node.get("created_at"))
     if created is None:
-        return 0.0
+        return False
     hours = (now - created).total_seconds() / 3600.0
-    if hours < 0 or hours > RECENT_CAPTURE_HOURS:
-        return 0.0
-    return RECENT_CAPTURE_SCORE * (1.0 - hours / RECENT_CAPTURE_HOURS)
+    return 0 <= hours <= RECENT_CAPTURE_HOURS
 
 
-def _urgency_rank(node: Dict[str, Any], today: date) -> float:
-    """Sort key for entered views (project detail / lists): deadline proximity
-    weighted by importance. Far-out deadlines still order by date here — inside
-    a project nothing is hidden, only ranked."""
-    deadline = _parse_deadline(node.get("target_date"))
+def _order_key(node: Dict[str, Any], today: date):
+    """THE display order, used by every view: soonest/overdue deadline first,
+    undated work last, ties broken by priority. One rule everywhere so the Lens
+    always reads the same way. A blocker borrows the deadline of what it gates
+    (its '_sort_date') and sits just above it."""
+    deadline = _parse_deadline(node.get("target_date") or node.get("_sort_date"))
+    rank = _PRIORITY_RANK.get(node.get("priority") or "normal", 1)
     if deadline is None:
-        base = 0.0
+        return (1, 0.0, -rank)                       # undated trails everything dated
+    days = (deadline - today).days
+    if node.get("_blocker"):
+        days -= 0.5                                  # nudge a blocker above its blocked peer
+    return (0, float(days), -rank)
+
+
+def _slot_key(node: Dict[str, Any], today: date):
+    """Used for the Today CAP only: when more than MAX_LENS_CARDS qualify, keep
+    the most pressing — balancing how SOON it's due against how IMPORTANT it is,
+    so a task due tomorrow isn't bumped by an undated high-priority one. A small
+    integer score (urgency tier 0-3 + importance 0-2), ties broken by soonest.
+    Display order is still pure deadline; this only picks the survivors."""
+    deadline = _parse_deadline(node.get("target_date") or node.get("_sort_date"))
+    days = (deadline - today).days if deadline is not None else None
+    if days is None:
+        urgency = 0
+    elif days <= IMMINENT_DAYS:
+        urgency = 3
+    elif days <= DEADLINE_WINDOW_DAYS:
+        urgency = 2
     else:
-        days_left = max((deadline - today).days, 0)
-        base = max(9.0 - (days_left / DEADLINE_WINDOW_DAYS) * 6.0, 1.0)
-    priority = node.get("priority") or "normal"
-    return (base + PRIORITY_BONUS.get(priority, 0.0)) * PRIORITY_MULTIPLIER.get(priority, 1.0)
+        urgency = 1
+    importance = _PRIORITY_RANK.get(node.get("priority") or "normal", 1)
+    return (-(urgency + importance), days if days is not None else float("inf"))
+
+
+def _qualifies_today(node: Dict[str, Any], today: date, now: datetime) -> bool:
+    """Does this node earn a Today slot? A simple predicate: due within the
+    window, important, or just captured. Low-priority work needs an imminent
+    deadline; everything else can qualify on importance or recency alone."""
+    deadline = _parse_deadline(node.get("target_date"))
+    days = (deadline - today).days if deadline is not None else None
+    if (node.get("priority") or "normal") == "low":
+        return days is not None and days <= IMMINENT_DAYS
+    within_window = days is not None and days <= DEADLINE_WINDOW_DAYS
+    return within_window or (node.get("priority") == "high") or _recently_captured(node, now)
 
 
 def _categorize(entry: Dict[str, Any], today: date) -> str:
@@ -109,7 +127,7 @@ def _categorize(entry: Dict[str, Any], today: date) -> str:
 def _finalize(entries: List[Dict[str, Any]], today: date) -> List[Dict[str, Any]]:
     for entry in entries:
         entry["category"] = _categorize(entry, today)
-        for key in ("_deadline", "_qualifies", "_blocker", "_sort_date"):
+        for key in ("_qualifies", "_blocker", "_sort_date"):
             entry.pop(key, None)
     return entries
 
@@ -120,8 +138,13 @@ def _finalize(entries: List[Dict[str, Any]], today: date) -> List[Dict[str, Any]
 
 def compute_today(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
                   now: Optional[datetime] = None) -> List[Dict[str, Any]]:
-    """Returns up to MAX_LENS_CARDS qualifying nodes, each annotated with
-    'lens_score' and 'category'. Non-qualifying nodes are excluded entirely.
+    """Returns up to MAX_LENS_CARDS qualifying nodes, each annotated with a
+    'category', in deadline order. Non-qualifying nodes are excluded entirely.
+
+    Three plain steps: (1) does each node QUALIFY (_qualifies_today); (2) if more
+    than the cap qualify, keep the most important (_slot_key); (3) DISPLAY what's
+    left in deadline order (_order_key). Importance only ever decides what shows,
+    never the reading order.
 
     Subtasks (nodes filed under a task, not a project) never appear in Today —
     they surface inside their parent container. A container task itself still
@@ -136,64 +159,36 @@ def compute_today(nodes: List[Dict[str, Any]], edges: List[Dict[str, Any]],
         and (by_id.get(e["parent_id"]) or {}).get("node_type") == "task"
     }
 
-    scored: Dict[int, Dict[str, Any]] = {}
+    candidates: Dict[int, Dict[str, Any]] = {}
     for node in nodes:
         if node["id"] in subtask_ids:
             continue
-        deadline = _deadline_score(node, today)
-        recency = _recency_score(node, now)
-        priority = node.get("priority") or "normal"
-
-        if priority == "low":
-            # Movable work doesn't take a Today slot unless it's truly imminent
-            qualifies = deadline >= IMMINENT_DEADLINE_SCORE
-        else:
-            qualifies = (
-                deadline > 0
-                or recency > 0
-                or priority == "high"  # important work is the default view
-            )
         entry = dict(node)
-        base = deadline + recency + PRIORITY_BONUS.get(priority, 0.0)
-        entry["lens_score"] = base * PRIORITY_MULTIPLIER.get(priority, 1.0)
-        entry["_deadline"] = deadline
-        entry["_qualifies"] = qualifies
-        scored[node["id"]] = entry
+        entry["_qualifies"] = _qualifies_today(entry, today, now)
+        candidates[node["id"]] = entry
 
-    # Blocker promotion: a node that blocks a qualifying node qualifies too,
-    # ranked just above the thing it blocks. Two passes cover short chains.
+    # Blocker promotion: a node that blocks a qualifier qualifies too, and
+    # inherits the deadline of what it gates so it sorts right beside it. Two
+    # passes cover short chains.
     for _ in range(2):
         for edge in edges:
             if edge.get("relationship") != "blocks":
                 continue
-            blocker = scored.get(edge["parent_id"])
-            blocked = scored.get(edge["child_id"])
-            if blocker and blocked and blocked["_qualifies"]:
-                if not blocker["_qualifies"] or blocker["lens_score"] <= blocked["lens_score"]:
-                    blocker["_qualifies"] = True
-                    blocker["lens_score"] = blocked["lens_score"] + 0.5
-                    blocker["_blocker"] = True
-                    # A blocker inherits the deadline of what it gates, so it
-                    # sorts right beside it even when it has no date of its own.
-                    blocker["_sort_date"] = (blocker.get("_sort_date")
-                                             or blocked.get("target_date")
-                                             or blocked.get("_sort_date"))
+            blocker = candidates.get(edge["parent_id"])
+            blocked = candidates.get(edge["child_id"])
+            if blocker and blocked and blocked["_qualifies"] and not blocker["_qualifies"]:
+                blocker["_qualifies"] = True
+                blocker["_blocker"] = True
+                blocker["_sort_date"] = (blocked.get("target_date")
+                                         or blocked.get("_sort_date"))
 
-    # lens_score decides what EARNS a Today slot (so high-priority and recently
-    # captured work surfaces even when undated); the displayed order is then by
-    # DEADLINE — soonest/overdue first — which is how people scan "this week".
-    qualifying = [entry for entry in scored.values() if entry["_qualifies"]]
-    qualifying.sort(key=lambda entry: entry["lens_score"], reverse=True)
-    shown = qualifying[:MAX_LENS_CARDS]
-
-    def _by_deadline(entry):
-        deadline = _parse_deadline(entry.get("target_date") or entry.get("_sort_date"))
-        if deadline is None:
-            return (1, 0, -entry["lens_score"])  # undated work trails dated, by score
-        return (0, (deadline - today).days, -entry["lens_score"])  # overdue → soonest first
-
-    shown.sort(key=_by_deadline)
-    return _finalize(shown, today)
+    qualifying = [e for e in candidates.values() if e["_qualifies"]]
+    if len(qualifying) > MAX_LENS_CARDS:
+        # Cap bites: keep the most important (then soonest), drop the rest.
+        qualifying.sort(key=lambda e: _slot_key(e, today))
+        qualifying = qualifying[:MAX_LENS_CARDS]
+    qualifying.sort(key=lambda e: _order_key(e, today))
+    return _finalize(qualifying, today)
 
 
 # ---------------------------------------------------------------------------
@@ -209,7 +204,7 @@ def compute_container_detail(nodes: List[Dict[str, Any]], edges: List[Dict[str, 
     child_ids = {e["child_id"] for e in edges
                  if e["relationship"] == "is_part_of" and e["parent_id"] == parent_id}
     members = [dict(n) for n in nodes if n["id"] in child_ids]
-    members.sort(key=lambda n: _urgency_rank(n, today), reverse=True)
+    members.sort(key=lambda n: _order_key(n, today))
     return _finalize(members, today)
 
 
@@ -222,7 +217,7 @@ def compute_list(nodes: List[Dict[str, Any]], node_ids: List[int]) -> List[Dict[
     today = datetime.now().date()
     wanted = set(node_ids)
     members = [dict(n) for n in nodes if n["id"] in wanted]
-    members.sort(key=lambda n: _urgency_rank(n, today), reverse=True)
+    members.sort(key=lambda n: _order_key(n, today))
     return _finalize(members, today)
 
 
@@ -233,7 +228,7 @@ def compute_loose_tasks(nodes: List[Dict[str, Any]],
     parented = {e["child_id"] for e in edges if e["relationship"] == "is_part_of"}
     members = [dict(n) for n in nodes
                if n["id"] not in parented and n.get("node_type") != "project"]
-    members.sort(key=lambda n: _urgency_rank(n, today), reverse=True)
+    members.sort(key=lambda n: _order_key(n, today))
     return _finalize(members, today)
 
 
@@ -266,7 +261,7 @@ def compute_filter(filter_name: str, nodes: List[Dict[str, Any]],
             member["done"] = True
         return _finalize(members, today)
 
-    members.sort(key=lambda n: _urgency_rank(n, today), reverse=True)
+    members.sort(key=lambda n: _order_key(n, today))
     return _finalize(members, today)
 
 
@@ -298,7 +293,7 @@ def compute_projects_overview(nodes: List[Dict[str, Any]],
                      if d is not None]
         entry["target_date"] = min(deadlines).isoformat() if deadlines else None
         cards.append(entry)
-    cards.sort(key=lambda n: _urgency_rank(n, today), reverse=True)
+    cards.sort(key=lambda n: _order_key(n, today))
     cards = _finalize(cards, today)
 
     loose = compute_loose_tasks(nodes, edges)

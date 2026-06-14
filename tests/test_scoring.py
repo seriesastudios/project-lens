@@ -111,6 +111,18 @@ def test_high_priority_qualifies_without_deadline():
     assert lens[0]["category"] == scoring.CATEGORY_UNDATED  # stripe carries importance
 
 
+def test_cap_keeps_imminent_deadline_over_undated_high_priority():
+    # When more than the cap qualify, a task due tomorrow must NOT be bumped by
+    # undated high-priority work — the cap weighs urgency against importance.
+    today = datetime.now().date()
+    due_tomorrow = make_node(1, target_date=(today + timedelta(days=1)).isoformat())
+    undated_high = [make_node(10 + i, priority="high") for i in range(scoring.MAX_LENS_CARDS)]
+    lens = scoring.compute_today([due_tomorrow] + undated_high, [], now=NOW)
+    assert len(lens) == scoring.MAX_LENS_CARDS
+    assert 1 in {e["id"] for e in lens}          # the imminent task survives
+    assert lens[0]["id"] == 1                     # and, being dated, leads the list
+
+
 def test_low_priority_needs_imminent_deadline():
     today = datetime.now().date()
     low_far = make_node(1, target_date=(today + timedelta(days=5)).isoformat(), priority="low")
