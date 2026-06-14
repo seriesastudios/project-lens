@@ -203,7 +203,19 @@
             } else if (chipName) {
                 const chip = document.createElement('p');
                 chip.className = 'text-[10px] font-semibold uppercase tracking-widest opacity-50 mb-1.5';
-                chip.textContent = chipName;
+                // When the chip names a real project, it doubles as the way in —
+                // same affordance the old section header carried.
+                if (node.project_id) {
+                    chip.className += ' cursor-pointer hover:opacity-100 hover:text-orange-500 transition-colors';
+                    chip.textContent = `${chipName} ▸`;
+                    chip.title = `Open ${chipName}`;
+                    chip.addEventListener('click', (e) => {
+                        e.stopPropagation();
+                        setView({ mode: 'node', path: [node.project_id] });
+                    });
+                } else {
+                    chip.textContent = chipName;
+                }
                 body.appendChild(chip);
             }
 
@@ -363,7 +375,8 @@
             }
 
             // Today: cluster cards by project, preserving score order between
-            // groups. Group headers are clickable — they open the project.
+            // groups. Every card carries its project as a clickable chip — one
+            // consistent label whether a project shows one task or several.
             const groups = [];
             const byKey = {};
             nodes.forEach((node) => {
@@ -377,26 +390,8 @@
 
             let index = 0;
             groups.forEach((group) => {
-                // A header earns its space when a project contributes 2+ cards;
-                // a lone card gets a small chip instead.
-                const useHeader = group.name && group.cards.length >= 2;
-                if (useHeader) {
-                    const header = document.createElement('div');
-                    header.className = 'flex items-baseline justify-between px-2 pt-2 card-enter cursor-pointer group';
-                    header.title = `Open ${group.name}`;
-                    header.addEventListener('click', () => setView({ mode: 'node', path: [group.id] }));
-                    const name = document.createElement('span');
-                    name.className = 'text-[11px] font-semibold uppercase tracking-widest text-gray-400 group-hover:text-orange-500 transition-colors';
-                    name.textContent = `${group.name} ▸`;
-                    const count = document.createElement('span');
-                    count.className = 'text-[11px] text-gray-300 font-medium';
-                    count.textContent = `${group.cards.length} of ${group.total} open`;
-                    header.appendChild(name);
-                    header.appendChild(count);
-                    nodeContainer.appendChild(header);
-                }
                 group.cards.forEach((node) => {
-                    nodeContainer.appendChild(buildCard(node, index, useHeader ? null : group.name,
+                    nodeContainer.appendChild(buildCard(node, index, group.name,
                                                         node.node_type === 'project'));
                     index += 1;
                 });

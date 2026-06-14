@@ -491,19 +491,6 @@ def test_template_confirmation_routine_outcomes():
                          "changed": {"deadline": "2026-07-01", "priority": "high"}})
     ]) == "Updated **Order business cards** — now due 2026-07-01, high priority."
 
-    assert template_confirmation([
-        ("open_view", {"success": True, "view": "project", "project": "The Cage", "open_tasks": 11})
-    ]) == "Opened **The Cage** — 11 open tasks."
-    assert template_confirmation([
-        ("open_view", {"success": True, "view": "projects", "project_count": 9})
-    ]) == "Showing your **9 projects**."
-    assert template_confirmation([
-        ("open_view", {"success": True, "view": "list", "label": "errands", "shown": 4})
-    ]) == "Showing **errands** — 4 tasks."
-    assert template_confirmation([
-        ("open_view", {"success": True, "view": "today"})
-    ]) == "Here's your day."
-
 
 def test_template_confirmation_defers_nuanced_cases():
     from app.engine.brain import template_confirmation
@@ -514,6 +501,22 @@ def test_template_confirmation_defers_nuanced_cases():
     ]) is None
     # a search with no follow-up action has nothing to confirm
     assert template_confirmation([("search_tasks", {"results": [], "hint": "x"})]) is None
+
+
+def test_navigation_defers_to_the_model():
+    """Navigation is a conversation, not a receipt: every open_view variant routes
+    to the stage-2 'speak' call (returns None) so the model answers using the
+    on-screen cards instead of a canned phrase."""
+    from app.engine.brain import template_confirmation
+    for view in (
+        {"success": True, "view": "today"},
+        {"success": True, "view": "projects", "project_count": 9},
+        {"success": True, "view": "project", "project": "The Cage", "open_tasks": 11},
+        {"success": True, "view": "list", "label": "errands", "shown": 4},
+        {"success": True, "view": "loose", "shown": 3},
+        {"success": True, "view": "filter", "filter": "overdue", "shown": 2},
+    ):
+        assert template_confirmation([("open_view", view)]) is None
 
 
 def test_template_confirmation_link():
@@ -549,14 +552,11 @@ def test_open_view_filter_requires_a_filter_name():
         fake_call("open_view", {"view": "filter", "filter": "nonsense"})))
 
 
-def test_filter_and_loose_confirmations():
-    from app.engine.brain import template_confirmation
-    assert template_confirmation([
-        ("open_view", {"success": True, "view": "filter", "filter": "overdue", "shown": 2})
-    ]) == "Showing **overdue** — 2 tasks."
-    assert template_confirmation([
-        ("open_view", {"success": True, "view": "filter", "filter": "done", "shown": 1})
-    ]) == "Showing **recently completed** — 1 task."
-    assert template_confirmation([
-        ("open_view", {"success": True, "view": "loose", "shown": 3})
-    ]) == "Showing your **loose tasks** — 3 tasks."
+def test_open_view_attaches_on_screen_snapshot():
+    """Navigation results carry a compact 'on_screen' list so the stage-2 speak
+    call can refer to the actual cards. Overdue items are flagged."""
+    models.add_node("pay the gas bill", target_date="2020-01-01")  # long overdue
+    result = json.loads(execute_tool_call(fake_call("open_view", {"view": "filter", "filter": "overdue"})))
+    assert "on_screen" in result and result["on_screen"]
+    overdue_card = next(c for c in result["on_screen"] if c["task"] == "pay the gas bill")
+    assert overdue_card.get("overdue") is True and overdue_card["due"] == "2020-01-01"

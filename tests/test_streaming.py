@@ -74,29 +74,32 @@ def test_plain_chat_turn_streams_tokens(monkeypatch):
 
 def test_leaked_call_retracts_streamed_tokens_and_executes(monkeypatch):
     # The model writes the tool call as prose; tokens stream optimistically,
-    # then a replace event retracts them and the salvaged call runs.
+    # then a replace event retracts them and the salvaged call runs. Navigation
+    # then speaks via a stage-2 call (no templated 'action' event).
     leak = 'open_view {"view": "today"}'
     stream = [chunk(content=leak[:10]), chunk(content=leak[10:])]
-    events = run_events(monkeypatch, [stream], "show me today")
+    speak = [chunk(content="Here's "), chunk(content="your day.")]
+    events = run_events(monkeypatch, [stream, speak], "show me today")
 
     types = [e["type"] for e in events]
-    assert types == ["status", "token", "token", "replace", "action", "lens", "done"]
+    assert types == ["status", "token", "token", "replace", "lens", "token", "token", "done"]
     assert events[3] == {"type": "replace", "text": ""}
-    assert events[4]["text"] == "Here's your day."
     assert events[-1]["reply"] == "Here's your day."
 
 
 def test_tokens_before_real_tool_call_are_retracted(monkeypatch):
     # Content spill before a genuine tool call is reasoning, not a reply.
+    # The navigation then gets a real spoken reply from the stage-2 call.
     args = json.dumps({"view": "projects"})
     stream = [
         chunk(content="Let me open that. "),
         chunk(tool_calls=[tool_delta(0, name="open_view", call_id="c1", arguments=args)]),
     ]
-    events = run_events(monkeypatch, [stream], "show my projects")
+    speak = [chunk(content="You've got "), chunk(content="9 projects going.")]
+    events = run_events(monkeypatch, [stream, speak], "show my projects")
     types = [e["type"] for e in events]
-    assert types == ["status", "token", "replace", "action", "lens", "done"]
-    assert "projects" in events[-1]["reply"]
+    assert types == ["status", "token", "replace", "lens", "token", "token", "done"]
+    assert events[-1]["reply"] == "You've got 9 projects going."
 
 
 def test_engine_down_yields_done_with_warning(monkeypatch):

@@ -201,6 +201,15 @@ POST_TOOL_REMINDER = (
     "technical details."
 )
 
+NAV_SPEAK_REMINDER = (
+    "You pulled up a view for the user — nothing was changed. Reply in ONE or TWO warm, "
+    "natural sentences, the way a person would after glancing at the list. The tool result's "
+    "'on_screen' field is what's now showing; you may call out one or two tasks that stand out "
+    "(bold them with **double asterisks**, and flag anything overdue or due soon), but NEVER "
+    "list them all — the Lens already shows them. If nothing is on screen, say so plainly. "
+    "No IDs, no tool names, no robotic counts — just talk."
+)
+
 
 def _calendar_table(now: datetime, days: int = 8) -> str:
     """The next two weeks as weekday→date lines; small models fail weekday math."""
@@ -763,6 +772,24 @@ def _execute_move(args: MoveTaskArgs) -> dict:
             "detached": detached}
 
 
+def _on_screen(limit: int = 8) -> List[dict]:
+    """A compact snapshot of what's now on the Lens, so a spoken reply can refer to
+    the actual cards instead of a canned phrase. Navigation turns attach this to
+    their result; the model reads it in the stage-2 'speak' call."""
+    from app.engine import views
+    today_iso = datetime.now().date().isoformat()
+    snapshot = []
+    for card in views.compute_view_cards().get("cards", [])[:limit]:
+        item = {"task": card.get("content")}
+        due = card.get("target_date")
+        if due:
+            item["due"] = due
+            if due < today_iso:
+                item["overdue"] = True
+        snapshot.append(item)
+    return snapshot
+
+
 def _execute_open_view(args: OpenViewArgs) -> dict:
     """Navigation: the model names a destination; Python resolves it into a view.
     The model never picks which tasks a project view contains — that's a query."""
@@ -785,7 +812,7 @@ def _execute_open_view(args: OpenViewArgs) -> dict:
         seen_node_ids.update(open_ids)
         seen_node_ids.add(resolved["id"])
         return {"success": True, "view": "project", "project": resolved["content"],
-                "open_tasks": len(open_ids)}
+                "open_tasks": len(open_ids), "on_screen": _on_screen()}
 
     if args.view == "list":
         active = [i for i in models.existing_node_ids(args.node_ids or [])
@@ -794,7 +821,7 @@ def _execute_open_view(args: OpenViewArgs) -> dict:
             return {"error": "None of those IDs are active tasks. Use IDs from ACTIVE TASKS or search_tasks results."}
         views.set_view({"mode": "list", "node_ids": active, "label": args.label or "selected tasks"})
         return {"success": True, "view": "list", "label": args.label or "selected tasks",
-                "shown": len(active)}
+                "shown": len(active), "on_screen": _on_screen()}
 
     if args.view == "filter":
         views.set_view({"mode": "filter", "filter": args.filter})
@@ -802,7 +829,8 @@ def _execute_open_view(args: OpenViewArgs) -> dict:
         for card in cards:
             if card.get("id") is not None:
                 seen_node_ids.add(card["id"])
-        return {"success": True, "view": "filter", "filter": args.filter, "shown": len(cards)}
+        return {"success": True, "view": "filter", "filter": args.filter,
+                "shown": len(cards), "on_screen": _on_screen()}
 
     views.set_view({"mode": args.view})  # today / projects / loose
     result = {"success": True, "view": args.view}
@@ -811,6 +839,7 @@ def _execute_open_view(args: OpenViewArgs) -> dict:
             1 for n in models.get_active_nodes() if n.get("node_type") == "project")
     elif args.view == "loose":
         result["shown"] = len(views.compute_view_cards()["cards"])
+    result["on_screen"] = _on_screen()
     return result
 
 
@@ -971,30 +1000,11 @@ def _confirmation_sentences(name: str, result: dict) -> Optional[List[str]]:
         sentences.append(f"Moved **{content}** to **{result['to']}**.")
 
     elif name == "open_view":
-        view = result.get("view")
-        if view == "project":
-            count = result.get("open_tasks", 0)
-            plural = "task" if count == 1 else "tasks"
-            sentences.append(f"Opened **{result['project']}** — {count} open {plural}.")
-        elif view == "projects":
-            count = result.get("project_count", 0)
-            sentences.append(f"Showing your **{count} projects**.")
-        elif view == "list":
-            count = result.get("shown", 0)
-            plural = "task" if count == 1 else "tasks"
-            sentences.append(f"Showing **{result.get('label', 'selection')}** — {count} {plural}.")
-        elif view == "loose":
-            count = result.get("shown", 0)
-            plural = "task" if count == 1 else "tasks"
-            sentences.append(f"Showing your **loose tasks** — {count} {plural}.")
-        elif view == "filter":
-            count = result.get("shown", 0)
-            label = {"overdue": "overdue", "high": "high-priority",
-                     "waiting": "on-hold", "done": "recently completed"}.get(result.get("filter"), "filtered")
-            plural = "task" if count == 1 else "tasks"
-            sentences.append(f"Showing **{label}** — {count} {plural}.")
-        else:
-            sentences.append("Here's your day.")
+        # Navigation is a conversation, not a receipt. Returning None routes the
+        # turn to the stage-2 'speak' call (NAV_SPEAK_REMINDER), where the model
+        # answers naturally using the 'on_screen' cards — instead of a canned
+        # "Here's your day." Mutations above stay fast and templated.
+        return None
 
     # search_tasks contributes no sentence; an action that followed it speaks
     return sentences
@@ -1193,7 +1203,12 @@ async def process_user_input_events(user_text: str):
         reply = template_confirmation(executed)
 
     if reply is None and not streamed_reply:
-        messages.append({"role": "system", "content": POST_TOOL_REMINDER})
+        # Pure navigation turns get a warm, card-aware voice; anything that
+        # mutated data gets the terse confirmation reminder.
+        nav_only = bool(executed) and all(
+            name in ("open_view", "search_tasks") for name, _ in executed)
+        messages.append({"role": "system",
+                         "content": NAV_SPEAK_REMINDER if nav_only else POST_TOOL_REMINDER})
         try:
             stream = await client.chat.completions.create(
                 model=config.AI_MODEL_NAME, messages=messages,
