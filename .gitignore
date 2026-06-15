@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 lens.db
 lens.db.backup-*
+.lens.log
 .env
 .pytest_cache/
 

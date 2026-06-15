@@ -7,4 +7,5 @@ websockets
 pydantic
 dateparser
 numpy
+pywebview
 pytest

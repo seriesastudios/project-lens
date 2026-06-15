@@ -24,6 +24,13 @@ seed step required. `python scripts/seed_demo.py --reset` loads fake demo data.
 
 Kill a stuck server: `lsof -ti :8000 | xargs kill`.
 
+**Desktop app.** `./lens` launches a native macOS window (pywebview) detached
+from the terminal; `app/desktop.py` runs uvicorn on a *dynamic free port* in a
+daemon thread and opens the window — one process, so closing the window stops the
+server. The LLM stays external (LM Studio); the desktop shell never manages it.
+`python -m app.desktop` runs it attached for debugging. Stop a detached instance
+with `pkill -f app.desktop`.
+
 ## Tests & eval — run BOTH before committing engine changes
 
 ```bash

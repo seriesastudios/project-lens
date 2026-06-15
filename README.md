@@ -70,6 +70,22 @@ DATABASE_PATH="lens.db"
 
 The SQLite database is created automatically on first launch, and embeddings backfill at startup.
 
+### Run as a desktop app (macOS)
+
+To launch Lens as a single native window instead of a browser tab:
+
+```bash
+./lens
+```
+
+This opens a Project Lens window and returns your shell prompt immediately — the
+app is detached, so it keeps running even if you close that terminal. Everything
+is one process: **closing the window stops the server** (no stray port to kill).
+To stop it from the command line: `pkill -f app.desktop`.
+
+The LLM still runs separately in LM Studio — the desktop app does not bundle or
+manage it. For debugging, run the window attached with `python -m app.desktop`.
+
 ### Load demo data (optional)
 
 A fresh database is empty. To explore with a made-up set of projects and tasks:

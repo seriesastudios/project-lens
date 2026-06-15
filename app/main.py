@@ -1,7 +1,12 @@
 import asyncio
 import json
+import pathlib
 from contextlib import asynccontextmanager
 from typing import List
+
+# Resolve bundled assets relative to the repo root, not the process cwd, so the
+# app works when launched from anywhere (e.g. the detached `lens` launcher).
+BASE_DIR = pathlib.Path(__file__).resolve().parent.parent
 
 from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.responses import FileResponse, StreamingResponse
@@ -159,7 +164,7 @@ async def websocket_endpoint(websocket: WebSocket):
 
 @app.get("/")
 async def serve_index():
-    return FileResponse("index.html")
+    return FileResponse(BASE_DIR / "index.html")
 
 
 if __name__ == "__main__":
