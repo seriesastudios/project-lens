@@ -23,6 +23,8 @@ from app.database import models
 from app.engine import scoring
 
 VIEW_STATE_KEY = "view"
+HISTORY_STATE_KEY = "view_history"
+MAX_HISTORY = 50
 DEFAULT_VIEW: Dict[str, Any] = {"mode": "today"}
 VALID_MODES = ("today", "projects", "node", "list", "loose", "filter")
 VALID_FILTERS = ("overdue", "high", "waiting", "done")
@@ -57,10 +59,76 @@ def get_view() -> Dict[str, Any]:
 
 
 def set_view(view: Dict[str, Any]) -> Dict[str, Any]:
+    """The silent setter: changes the current view without touching history.
+    Used for internal fallbacks (stale-path trimming, emptied lists) so those
+    never pollute the back/forward stacks. Intentional navigation goes through
+    navigate()/go_back()/go_forward() instead."""
     if not _valid(view):
         raise ValueError(f"Invalid view state: {view!r}")
     models.set_state(VIEW_STATE_KEY, json.dumps(view))
     return view
+
+
+# --- Back / forward history -------------------------------------------------
+# A back-stack and a forward-stack of whole view dicts, persisted in app_state
+# next to the current view, so navigation history survives restarts.
+
+def _load_history() -> Dict[str, List[Dict[str, Any]]]:
+    raw = models.get_state(HISTORY_STATE_KEY)
+    if raw:
+        try:
+            hist = json.loads(raw)
+            if isinstance(hist, dict) and isinstance(hist.get("back"), list) \
+                    and isinstance(hist.get("forward"), list):
+                return hist
+        except ValueError:
+            pass
+    return {"back": [], "forward": []}
+
+
+def _save_history(hist: Dict[str, List[Dict[str, Any]]]) -> None:
+    models.set_state(HISTORY_STATE_KEY, json.dumps(hist))
+
+
+def _view_id(view: Dict[str, Any]) -> str:
+    """Canonical identity so re-navigating to the same place adds no entry."""
+    return json.dumps(view, sort_keys=True)
+
+
+def navigate(view: Dict[str, Any]) -> Dict[str, Any]:
+    """Intentional navigation (click or chat): record the current view on the
+    back-stack, clear the forward-stack, then switch. A no-op if the target is
+    the view already showing."""
+    if not _valid(view):
+        raise ValueError(f"Invalid view state: {view!r}")
+    current = get_view()
+    if _view_id(current) != _view_id(view):
+        hist = _load_history()
+        hist["back"].append(current)
+        del hist["back"][:-MAX_HISTORY]  # keep only the most recent MAX_HISTORY
+        hist["forward"] = []
+        _save_history(hist)
+    return set_view(view)
+
+
+def go_back() -> Optional[Dict[str, Any]]:
+    hist = _load_history()
+    if not hist["back"]:
+        return None
+    hist["forward"].append(get_view())
+    target = hist["back"].pop()
+    _save_history(hist)
+    return set_view(target)
+
+
+def go_forward() -> Optional[Dict[str, Any]]:
+    hist = _load_history()
+    if not hist["forward"]:
+        return None
+    hist["back"].append(get_view())
+    target = hist["forward"].pop()
+    _save_history(hist)
+    return set_view(target)
 
 
 def resolve_project(name: str) -> Union[Dict[str, Any], List[Dict[str, Any]]]:
@@ -130,8 +198,10 @@ def view_meta(view: Dict[str, Any], cards: List[Dict[str, Any]]) -> Dict[str, An
                  "waiting": "Waiting on", "done": "Done this week"}.get(view.get("filter"), "Filtered")
     else:
         label = view.get("label") or "Selection"
+    hist = _load_history()
     return {"mode": mode, "label": label, "breadcrumb": breadcrumb,
-            "count": len(cards), "back": mode != "today"}
+            "count": len(cards), "back": mode != "today",
+            "can_back": bool(hist["back"]), "can_forward": bool(hist["forward"])}
 
 
 def compute_view_cards() -> Dict[str, Any]:

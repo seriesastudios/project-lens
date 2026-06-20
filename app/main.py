@@ -142,13 +142,27 @@ async def set_view(request: ViewRequest):
             node = models.get_node(nid)
             if not node or node["status"] != "active":
                 raise HTTPException(status_code=404, detail=f"No active node {nid} in path")
-        views.set_view({"mode": "node", "path": path})
+        views.navigate({"mode": "node", "path": path})
     elif request.mode in ("today", "projects", "loose"):
-        views.set_view({"mode": request.mode})
+        views.navigate({"mode": request.mode})
     else:
         raise HTTPException(status_code=422, detail=f"Unknown mode {request.mode!r}")
     await manager.broadcast_state()
     return {"success": True}
+
+
+@app.post("/api/nav/{direction}")
+async def navigate_history(direction: str):
+    """Browser-style back/forward across recently-visited views. The result is
+    pushed over the WebSocket; an empty stack is a no-op (success, moved=False)."""
+    if direction == "back":
+        moved = views.go_back()
+    elif direction == "forward":
+        moved = views.go_forward()
+    else:
+        raise HTTPException(status_code=422, detail=f"Unknown direction {direction!r}")
+    await manager.broadcast_state()
+    return {"success": True, "moved": moved is not None}
 
 
 @app.websocket("/ws")

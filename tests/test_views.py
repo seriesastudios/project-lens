@@ -222,3 +222,62 @@ def test_empty_filter_view_renders_cleanly():
     out = views.compute_view_cards()
     assert out["cards"] == []
     assert out["view"]["label"] == "Overdue"
+
+
+# ---------------------------------------------------------------------------
+# Back / forward history
+# ---------------------------------------------------------------------------
+
+def test_navigate_records_back_and_switches():
+    views.navigate({"mode": "projects"})
+    assert views.get_view() == {"mode": "projects"}
+    # the prior (default today) view is now on the back-stack
+    assert views._load_history()["back"] == [{"mode": "today"}]
+
+
+def test_navigate_to_same_view_adds_no_history():
+    views.navigate({"mode": "projects"})
+    views.navigate({"mode": "projects"})  # no-op: already there
+    assert views._load_history()["back"] == [{"mode": "today"}]
+
+
+def test_go_back_and_forward_are_inverse():
+    views.navigate({"mode": "projects"})
+    project, _ = seed_project()
+    views.navigate({"mode": "node", "path": [project]})
+
+    assert views.go_back() == {"mode": "projects"}
+    assert views.get_view() == {"mode": "projects"}
+    assert views.go_back() == {"mode": "today"}
+    assert views.get_view() == {"mode": "today"}
+
+    assert views.go_forward() == {"mode": "projects"}
+    assert views.go_forward() == {"mode": "node", "path": [project]}
+    assert views.get_view() == {"mode": "node", "path": [project]}
+
+
+def test_go_back_on_empty_stack_is_noop():
+    assert views.go_back() is None
+    assert views.go_forward() is None
+    assert views.get_view() == {"mode": "today"}
+
+
+def test_navigate_after_back_drops_forward():
+    views.navigate({"mode": "projects"})
+    views.navigate({"mode": "loose"})
+    views.go_back()                       # back to projects; loose is on forward
+    views.navigate({"mode": "today"})     # new branch — forward must be cleared
+    assert views._load_history()["forward"] == []
+    assert views.go_forward() is None
+
+
+def test_view_meta_reports_can_back_and_forward():
+    out = views.compute_view_cards()      # default today, no history
+    assert out["view"]["can_back"] is False
+    assert out["view"]["can_forward"] is False
+
+    views.navigate({"mode": "projects"})
+    assert views.compute_view_cards()["view"]["can_back"] is True
+
+    views.go_back()
+    assert views.compute_view_cards()["view"]["can_forward"] is True

@@ -807,7 +807,7 @@ def _execute_open_view(args: OpenViewArgs) -> dict:
         if resolved["status"] != "active":
             return {"error": (f"Project '{resolved['content']}' is on hold. To work on it, "
                               "resume it first with update_task status 'active', then open it.")}
-        views.set_view({"mode": "node", "path": [resolved["id"]]})
+        views.navigate({"mode": "node", "path": [resolved["id"]]})
         open_ids = models.get_active_child_ids(resolved["id"])
         seen_node_ids.update(open_ids)
         seen_node_ids.add(resolved["id"])
@@ -819,12 +819,12 @@ def _execute_open_view(args: OpenViewArgs) -> dict:
                   if (models.get_node(i) or {}).get("status") == "active"]
         if not active:
             return {"error": "None of those IDs are active tasks. Use IDs from ACTIVE TASKS or search_tasks results."}
-        views.set_view({"mode": "list", "node_ids": active, "label": args.label or "selected tasks"})
+        views.navigate({"mode": "list", "node_ids": active, "label": args.label or "selected tasks"})
         return {"success": True, "view": "list", "label": args.label or "selected tasks",
                 "shown": len(active), "on_screen": _on_screen()}
 
     if args.view == "filter":
-        views.set_view({"mode": "filter", "filter": args.filter})
+        views.navigate({"mode": "filter", "filter": args.filter})
         cards = views.compute_view_cards()["cards"]
         for card in cards:
             if card.get("id") is not None:
@@ -832,7 +832,7 @@ def _execute_open_view(args: OpenViewArgs) -> dict:
         return {"success": True, "view": "filter", "filter": args.filter,
                 "shown": len(cards), "on_screen": _on_screen()}
 
-    views.set_view({"mode": args.view})  # today / projects / loose
+    views.navigate({"mode": args.view})  # today / projects / loose
     result = {"success": True, "view": args.view}
     if args.view == "projects":
         result["project_count"] = sum(
