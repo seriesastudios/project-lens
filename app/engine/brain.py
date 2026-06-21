@@ -708,9 +708,52 @@ def _execute_complete(args: CompleteTasksArgs) -> dict:
     return result
 
 
+def _cascade_subtask_dates(node_id: int, old_date: Optional[str],
+                           new_date: Optional[str]) -> List[dict]:
+    """Keep an is_part_of subtree consistent when a node's deadline moves: a
+    subtask sitting ON the parent's old date rides along (in or out), and any
+    subtask left due AFTER the new date is pulled in to it. Subtasks with their
+    own earlier dates — and undated ones — are left untouched. Each changed node
+    propagates its own (old → new) shift to its children. Deterministic; the
+    model never picks which dates move. Returns the changes, for the reply."""
+    from app.engine import scoring
+
+    new_d = scoring._parse_deadline(new_date)
+    if new_d is None:
+        return []  # clearing a deadline imposes no ceiling — nothing cascades
+
+    changes: List[dict] = []
+    visited = {node_id}
+    stack = [(node_id, old_date)]  # (parent, parent's pre-change date)
+    while stack:
+        parent_id, parent_old = stack.pop()
+        parent_old_d = scoring._parse_deadline(parent_old)
+        for child_id in models.get_active_child_ids(parent_id, "is_part_of"):
+            if child_id in visited:
+                continue  # diamond/cycle safety for multi-home tasks
+            visited.add(child_id)
+            child = models.get_node(child_id)
+            if not child:
+                continue
+            c_old = child.get("target_date")
+            c_old_d = scoring._parse_deadline(c_old)
+            if c_old_d is None:
+                continue  # undated — never invent a date
+            rides = parent_old_d is not None and c_old_d == parent_old_d
+            clamps = c_old_d > new_d
+            if rides or clamps:
+                models.update_node(child_id, target_date=new_date)
+                changes.append({"id": child_id, "content": child["content"],
+                                "from": c_old, "to": new_date})
+                stack.append((child_id, c_old))  # propagate this node's shift down
+    return changes
+
+
 def _execute_update(args: UpdateTaskArgs) -> dict:
     if not models.existing_node_ids([args.node_id]):
         return {"error": f"Task {args.node_id} does not exist. Use an ID from the active task list."}
+    before = models.get_node(args.node_id)
+    old_date = before.get("target_date") if before else None
     models.update_node(args.node_id, content=args.content, status=args.status,
                        target_date=args.deadline, priority=args.priority,
                        description=args.description, node_type=args.node_type)
@@ -730,6 +773,15 @@ def _execute_update(args: UpdateTaskArgs) -> dict:
                                  ("description", args.description), ("node_type", args.node_type))
                if v is not None}
     result["changed"] = changed
+    # A deadline move keeps its subtasks consistent (clamp in / ride out).
+    if "deadline" in changed:
+        from app.engine import scoring
+        old_d, new_d = scoring._parse_deadline(old_date), scoring._parse_deadline(args.deadline)
+        if old_d != new_d:
+            cascaded = _cascade_subtask_dates(args.node_id, old_date, args.deadline)
+            if cascaded:
+                result["cascaded"] = cascaded
+                result["cascade_direction"] = "out" if (old_d and new_d and new_d > old_d) else "in"
     return result
 
 
@@ -984,6 +1036,14 @@ def _confirmation_sentences(name: str, result: dict) -> Optional[List[str]]:
             parts.append(f"{changed['priority']} priority")
         detail = f" — {', '.join(parts)}" if parts else ""
         sentences.append(f"Updated **{content}**{detail}.")
+        cascaded = result.get("cascaded")
+        if cascaded:
+            n = len(cascaded)
+            noun = "subtask" if n == 1 else "subtasks"
+            if result.get("cascade_direction") == "out":
+                sentences.append(f"Also nudged {n} {noun} out to keep pace.")
+            else:
+                sentences.append(f"Also pulled {n} {noun} in so they stay before it.")
 
     elif name == "link_tasks":
         parent = _node_content(result["parent_id"])
