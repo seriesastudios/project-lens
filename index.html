@@ -109,17 +109,28 @@
                     <p class="text-sm text-gray-400 mt-1 font-medium">What matters right now</p>
                 </div>
             </div>
-            <div class="flex items-center gap-2 text-xs font-semibold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-100">
-                <span class="relative flex h-2 w-2">
-                  <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-                  <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-                </span>
-                Sync Active
+            <div class="flex items-center gap-3">
+                <button id="add-task-btn" title="Add task (⌘N)" aria-label="Add task"
+                    class="h-8 w-8 flex items-center justify-center rounded-lg bg-orange-500 text-white text-xl leading-none hover:bg-orange-600 active:scale-95 transition-all shadow-sm">+</button>
+                <div class="flex items-center gap-2 text-xs font-semibold text-emerald-600 bg-emerald-50 px-2.5 py-1 rounded-full border border-emerald-100">
+                    <span class="relative flex h-2 w-2">
+                      <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                      <span class="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                    </span>
+                    Sync Active
+                </div>
             </div>
         </div>
 
         <!-- Node List -->
         <div class="flex-1 px-8 py-6 pt-2 overflow-y-auto no-scrollbar">
+            <!-- Quick-add (sibling of node-container so WS re-renders don't wipe it) -->
+            <div id="quick-add" class="hidden mb-4">
+                <input type="text" id="quick-add-input" autocomplete="off"
+                    placeholder="Add a task…"
+                    class="w-full bg-white border border-orange-200 text-gray-800 text-[15px] rounded-xl focus:ring-4 focus:ring-orange-50 focus:border-orange-300 block px-4 py-3 outline-none transition-all placeholder-gray-400 font-medium shadow-sm">
+                <div id="quick-add-target" class="text-xs text-gray-400 font-medium mt-1.5 ml-1"></div>
+            </div>
             <div id="node-container" class="space-y-3.5 flex flex-col">
                 <!-- Cards injected here via WebSocket -->
                 <div class="text-center py-20 text-gray-400 text-sm italic">Connecting…</div>
@@ -136,6 +147,10 @@
         const sendBtn = document.getElementById('send-btn');
         const navBackBtn = document.getElementById('nav-back');
         const navForwardBtn = document.getElementById('nav-forward');
+        const addTaskBtn = document.getElementById('add-task-btn');
+        const quickAdd = document.getElementById('quick-add');
+        const quickAddInput = document.getElementById('quick-add-input');
+        const quickAddTarget = document.getElementById('quick-add-target');
 
         // Browser-style history; the server owns the back/forward stacks, the
         // result returns over the WebSocket like any other view change.
@@ -143,6 +158,60 @@
             fetch('/api/nav/' + direction, { method: 'POST' }).catch(() => {});
         navBackBtn.addEventListener('click', () => nav('back'));
         navForwardBtn.addEventListener('click', () => nav('forward'));
+
+        // Quick-add: deterministic create (no LLM). The server files the task
+        // under the currently-viewed container; mixed views add it unfiled.
+        const refreshQuickAddTarget = () => {
+            const inNode = currentView && currentView.mode === 'node';
+            quickAddTarget.innerHTML = inNode
+                ? 'Adding to <span class="font-semibold text-orange-500"></span>'
+                : 'Adding to <span class="font-semibold text-gray-500">No project</span>';
+            if (inNode) quickAddTarget.querySelector('span').textContent = currentView.label || 'this';
+        };
+        const openQuickAdd = () => {
+            refreshQuickAddTarget();
+            quickAdd.classList.remove('hidden');
+            quickAddInput.focus();
+        };
+        const closeQuickAdd = () => {
+            quickAdd.classList.add('hidden');
+            quickAddInput.value = '';
+        };
+        const toggleQuickAdd = () =>
+            quickAdd.classList.contains('hidden') ? openQuickAdd() : closeQuickAdd();
+
+        addTaskBtn.addEventListener('click', toggleQuickAdd);
+
+        quickAddInput.addEventListener('keydown', async (e) => {
+            if (e.key === 'Escape') { closeQuickAdd(); return; }
+            if (e.key !== 'Enter') return;
+            const content = quickAddInput.value.trim();
+            if (!content) return;
+            quickAddInput.value = '';
+            try {
+                await fetch('/api/tasks', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ content }),
+                });
+                // Brief confirmation; the new card arrives over the WebSocket.
+                quickAddTarget.innerHTML = '<span class="font-semibold text-emerald-600">Added ✓</span>';
+                setTimeout(() => { if (!quickAdd.classList.contains('hidden')) refreshQuickAddTarget(); }, 1200);
+                quickAddInput.focus();  // stay open for rapid entry
+            } catch (_) {
+                quickAddTarget.innerHTML = '<span class="font-semibold text-rose-500">Could not add — is the backend running?</span>';
+            }
+        });
+
+        // ⌘N (or Ctrl-N) opens quick-add from anywhere; Esc closes it.
+        document.addEventListener('keydown', (e) => {
+            if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'n') {
+                e.preventDefault();
+                openQuickAdd();
+            } else if (e.key === 'Escape' && !quickAdd.classList.contains('hidden')) {
+                closeQuickAdd();
+            }
+        });
 
         // Card wash = EISENHOWER QUADRANT (urgency × importance). Urgency = is it
         // due now — the 'next' band (overdue / ≤2 days); importance = high priority.
@@ -329,6 +398,7 @@
 
             navBackBtn.disabled = !(view && view.can_back);
             navForwardBtn.disabled = !(view && view.can_forward);
+            if (!quickAdd.classList.contains('hidden')) refreshQuickAddTarget();
 
             // Breadcrumb: where you are and every way back up. Views are sticky —
             // they only change when you navigate (by chat or click).

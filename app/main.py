@@ -116,6 +116,24 @@ async def complete_node(node_id: int):
     return {"success": True, "node_id": node_id}
 
 
+class NewTaskRequest(BaseModel):
+    content: str
+    parent_id: int | None = None        # default: the currently-viewed container
+
+
+@app.post("/api/tasks")
+async def create_task(request: NewTaskRequest):
+    """Deterministic quick-add (+ button / ⌘N) — no LLM round-trip. The parent
+    defaults to the currently-viewed container; mixed views add unfiled."""
+    try:
+        result = views.add_task(request.content, request.parent_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc))
+    embeddings.index_node(result["node_id"], request.content.strip())
+    await manager.broadcast_state()
+    return {"success": True, **result}
+
+
 @app.get("/api/lens")
 async def get_lens():
     state = views.compute_view_cards()

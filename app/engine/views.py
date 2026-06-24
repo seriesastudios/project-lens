@@ -258,3 +258,31 @@ def view_member_ids(view: Optional[Dict[str, Any]] = None) -> List[int]:
     if view["mode"] == "list":
         return list(view["node_ids"])
     return []
+
+
+def current_container_id() -> Optional[int]:
+    """The single container the view is inside (a project or task), or None when
+    the view mixes items from many parents (today/projects/filter/list/loose).
+    This is the default parent for a quick-added task."""
+    view = get_view()
+    return view["path"][-1] if view["mode"] == "node" else None
+
+
+def add_task(content: str, parent_id: Optional[int] = None) -> Dict[str, Any]:
+    """Deterministic quick-add (no LLM): create a task and file it under the
+    given parent, else under the currently-viewed container, else nowhere. An
+    explicit-but-stale parent silently falls back to unfiled rather than erroring.
+    Raises ValueError on empty content."""
+    content = (content or "").strip()
+    if not content:
+        raise ValueError("Task content is required.")
+    if parent_id is None:
+        parent_id = current_container_id()
+    if parent_id is not None:
+        parent = models.get_node(parent_id)
+        if not parent or parent["status"] != "active":
+            parent_id = None
+    node_id = models.add_node(content)
+    if parent_id is not None:
+        models.add_edge(parent_id, node_id, "is_part_of")
+    return {"node_id": node_id, "parent_id": parent_id}

@@ -2,8 +2,10 @@
 resolution, and stale-view fallbacks."""
 from datetime import datetime, timedelta
 
+import pytest
+
 from app.database import models
-from app.engine import views
+from app.engine import scoring, views
 
 
 def today_plus(days=0):
@@ -281,3 +283,53 @@ def test_view_meta_reports_can_back_and_forward():
 
     views.go_back()
     assert views.compute_view_cards()["view"]["can_forward"] is True
+
+
+# ---------------------------------------------------------------------------
+# Quick-add (deterministic, no LLM)
+# ---------------------------------------------------------------------------
+
+def test_current_container_id_only_in_node_view():
+    project, _ = seed_project()
+    views.set_view({"mode": "node", "path": [project]})
+    assert views.current_container_id() == project
+    for v in ({"mode": "today"}, {"mode": "projects"}, {"mode": "loose"},
+              {"mode": "filter", "filter": "overdue"}):
+        views.set_view(v)
+        assert views.current_container_id() is None
+
+
+def test_add_task_files_under_current_container():
+    project, _ = seed_project()
+    views.set_view({"mode": "node", "path": [project]})
+    result = views.add_task("Pitch the client")
+    assert result["parent_id"] == project
+    assert result["node_id"] in models.get_active_child_ids(project)
+
+
+def test_add_task_in_mixed_view_is_unfiled_and_loose():
+    seed_project()  # a project exists, but we're on Today (mixed)
+    views.set_view({"mode": "today"})
+    result = views.add_task("Buy stamps")
+    assert result["parent_id"] is None
+    loose = scoring.compute_loose_tasks(models.get_active_nodes(), models.get_all_edges())
+    assert any(c["id"] == result["node_id"] for c in loose)
+
+
+def test_add_task_honors_explicit_parent_over_view():
+    project, _ = seed_project()
+    views.set_view({"mode": "today"})  # view says unfiled…
+    result = views.add_task("Filed anyway", parent_id=project)  # …but caller insists
+    assert result["parent_id"] == project
+    assert result["node_id"] in models.get_active_child_ids(project)
+
+
+def test_add_task_with_stale_parent_falls_back_to_unfiled():
+    result = views.add_task("Orphan", parent_id=999999)  # no such node
+    assert result["parent_id"] is None
+    assert models.get_node(result["node_id"]) is not None
+
+
+def test_add_task_rejects_empty_content():
+    with pytest.raises(ValueError):
+        views.add_task("   ")

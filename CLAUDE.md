@@ -1,8 +1,12 @@
 # Project Lens — contributor & agent guide
 
-Local-first, AI-native task manager. **Chat is the only input.** A small local LLM
-turns natural language into validated tool calls that mutate a SQLite task graph;
-a read-only **Lens** pane renders cards. No cloud, no accounts.
+Local-first, AI-native task manager. **Chat is the primary, NLP input** — a small
+local LLM turns natural language into validated tool calls that mutate a SQLite
+task graph. A handful of **deterministic, no-LLM UI actions** complement it (the
+card complete checkbox, click-navigation, back/forward, and quick-add a task via
+the **+** button / **⌘N**); these are thin endpoints that mutate the graph and
+push state, never going through the model. The **Lens** pane renders cards. No
+cloud, no accounts.
 
 This file is for anyone (human or AI) modifying the code. End users should start
 with `README.md`. Read this before changing the engine — several design rules are
@@ -47,7 +51,9 @@ with `pkill -f app.desktop`.
 ## Architecture
 
 ```
-app/main.py        FastAPI: /api/chat (NDJSON stream), /ws (state push), static index.html
+app/main.py        FastAPI: /api/chat (NDJSON stream), /ws (state push), deterministic
+                   actions (/api/tasks add, /api/nodes/{id}/complete, /api/view, /api/nav),
+                   static index.html
 app/config.py      env-driven config
 app/database/models.py   SQLite schema + all DB primitives (the ONLY module that writes SQL)
 app/engine/brain.py      LLM tool-calling loop, tool schemas, Pydantic validation, prompt
