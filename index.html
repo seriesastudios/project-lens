@@ -161,7 +161,17 @@
 
         // Quick-add: deterministic create (no LLM). The server files the task
         // under the currently-viewed container; mixed views add it unfiled.
+        // In the Projects overview the + makes a PROJECT; elsewhere a task,
+        // filed under the current container (node view) or unfiled (mixed view).
+        const quickAddType = () =>
+            (currentView && currentView.mode === 'projects') ? 'project' : 'task';
         const refreshQuickAddTarget = () => {
+            if (quickAddType() === 'project') {
+                quickAddInput.placeholder = 'New project…';
+                quickAddTarget.innerHTML = 'Creating a <span class="font-semibold text-orange-500">new project</span>';
+                return;
+            }
+            quickAddInput.placeholder = 'Add a task…';
             const inNode = currentView && currentView.mode === 'node';
             quickAddTarget.innerHTML = inNode
                 ? 'Adding to <span class="font-semibold text-orange-500"></span>'
@@ -187,15 +197,17 @@
             if (e.key !== 'Enter') return;
             const content = quickAddInput.value.trim();
             if (!content) return;
+            const node_type = quickAddType();
             quickAddInput.value = '';
             try {
                 await fetch('/api/tasks', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ content }),
+                    body: JSON.stringify({ content, node_type }),
                 });
                 // Brief confirmation; the new card arrives over the WebSocket.
-                quickAddTarget.innerHTML = '<span class="font-semibold text-emerald-600">Added ✓</span>';
+                const added = node_type === 'project' ? 'Project added ✓' : 'Added ✓';
+                quickAddTarget.innerHTML = `<span class="font-semibold text-emerald-600">${added}</span>`;
                 setTimeout(() => { if (!quickAdd.classList.contains('hidden')) refreshQuickAddTarget(); }, 1200);
                 quickAddInput.focus();  // stay open for rapid entry
             } catch (_) {

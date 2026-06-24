@@ -268,21 +268,29 @@ def current_container_id() -> Optional[int]:
     return view["path"][-1] if view["mode"] == "node" else None
 
 
-def add_task(content: str, parent_id: Optional[int] = None) -> Dict[str, Any]:
-    """Deterministic quick-add (no LLM): create a task and file it under the
-    given parent, else under the currently-viewed container, else nowhere. An
-    explicit-but-stale parent silently falls back to unfiled rather than erroring.
-    Raises ValueError on empty content."""
+def add_task(content: str, parent_id: Optional[int] = None,
+             node_type: str = "task") -> Dict[str, Any]:
+    """Deterministic quick-add (no LLM). A task is filed under the given parent,
+    else the currently-viewed container, else nowhere (an explicit-but-stale
+    parent silently falls back to unfiled). A project is always top-level — it
+    takes no parent. Raises ValueError on empty content or a bad node_type."""
     content = (content or "").strip()
     if not content:
         raise ValueError("Task content is required.")
-    if parent_id is None:
-        parent_id = current_container_id()
-    if parent_id is not None:
-        parent = models.get_node(parent_id)
-        if not parent or parent["status"] != "active":
-            parent_id = None
-    node_id = models.add_node(content)
+    if node_type not in models.VALID_NODE_TYPES:
+        raise ValueError(f"node_type must be one of {models.VALID_NODE_TYPES}")
+
+    if node_type == "project":
+        parent_id = None  # projects are top-level containers
+    else:
+        if parent_id is None:
+            parent_id = current_container_id()
+        if parent_id is not None:
+            parent = models.get_node(parent_id)
+            if not parent or parent["status"] != "active":
+                parent_id = None
+
+    node_id = models.add_node(content, node_type=node_type)
     if parent_id is not None:
         models.add_edge(parent_id, node_id, "is_part_of")
-    return {"node_id": node_id, "parent_id": parent_id}
+    return {"node_id": node_id, "parent_id": parent_id, "node_type": node_type}

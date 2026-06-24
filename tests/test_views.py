@@ -333,3 +333,21 @@ def test_add_task_with_stale_parent_falls_back_to_unfiled():
 def test_add_task_rejects_empty_content():
     with pytest.raises(ValueError):
         views.add_task("   ")
+
+
+def test_add_project_is_top_level_even_inside_a_container():
+    project, _ = seed_project()
+    views.set_view({"mode": "node", "path": [project]})  # inside a project…
+    result = views.add_task("New initiative", node_type="project")
+    assert result["node_type"] == "project"
+    assert result["parent_id"] is None  # …but a project is never filed under one
+    node = models.get_node(result["node_id"])
+    assert node["node_type"] == "project"
+    overview = scoring.compute_projects_overview(
+        models.get_active_nodes(), models.get_all_edges())
+    assert any(c["id"] == result["node_id"] for c in overview)
+
+
+def test_add_task_rejects_bad_node_type():
+    with pytest.raises(ValueError):
+        views.add_task("Whatever", node_type="folder")

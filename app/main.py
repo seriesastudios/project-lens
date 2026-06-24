@@ -119,14 +119,16 @@ async def complete_node(node_id: int):
 class NewTaskRequest(BaseModel):
     content: str
     parent_id: int | None = None        # default: the currently-viewed container
+    node_type: str = "task"             # "project" creates a top-level project
 
 
 @app.post("/api/tasks")
 async def create_task(request: NewTaskRequest):
-    """Deterministic quick-add (+ button / ⌘N) — no LLM round-trip. The parent
-    defaults to the currently-viewed container; mixed views add unfiled."""
+    """Deterministic quick-add (+ button / ⌘N) — no LLM round-trip. A task's
+    parent defaults to the currently-viewed container (mixed views add unfiled);
+    node_type 'project' makes a top-level project instead."""
     try:
-        result = views.add_task(request.content, request.parent_id)
+        result = views.add_task(request.content, request.parent_id, request.node_type)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
     embeddings.index_node(result["node_id"], request.content.strip())
