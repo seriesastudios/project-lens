@@ -368,6 +368,77 @@ def normalize_deadline(value: Optional[str], base: Optional[datetime] = None) ->
     return parsed.date().isoformat()
 
 
+_QUICK_ENRICH_PROMPT = (
+    "You clean up a single quick task entry typed in a hurry. Return ONLY a JSON "
+    "object with these keys:\n"
+    '  "title": the task text with any date or priority words removed, kept faithful '
+    "(do not rephrase or add anything);\n"
+    '  "deadline": the date in the user\'s own words (e.g. "tomorrow", "friday", '
+    '"end of month"), or null if none;\n'
+    '  "priority": "high" if it sounds urgent/important, "low" if it sounds optional '
+    '("no rush", "someday"), else null.\n'
+    "Examples:\n"
+    'Input: "Send booking proposal tomorrow" -> '
+    '{"title": "Send booking proposal", "deadline": "tomorrow", "priority": null}\n'
+    'Input: "call vendor friday urgent" -> '
+    '{"title": "Call vendor", "deadline": "friday", "priority": "high"}\n'
+    'Input: "Buy stamps" -> {"title": "Buy stamps", "deadline": null, "priority": null}'
+)
+
+
+def _extract_json_object(text: str) -> Optional[dict]:
+    """Pull the first {...} JSON object out of a model reply, tolerating prose."""
+    if not text:
+        return None
+    start = text.find("{")
+    if start == -1:
+        return None
+    try:
+        obj, _ = json.JSONDecoder().raw_decode(text[start:])
+    except ValueError:
+        return None
+    return obj if isinstance(obj, dict) else None
+
+
+async def enrich_quick_task(raw: str) -> dict:
+    """Best-effort LLM cleanup of a quick-add entry. Returns only the fields that
+    should change — any of content / target_date / priority — or {} if the model
+    is unavailable, the reply won't parse, or nothing needs changing (the caller
+    then leaves the task exactly as typed). Date math stays in normalize_deadline."""
+    raw = (raw or "").strip()
+    if not raw:
+        return {}
+    try:
+        response = await client.chat.completions.create(
+            model=config.AI_MODEL_NAME,
+            temperature=0,
+            max_tokens=200,
+            messages=[
+                {"role": "system", "content": _QUICK_ENRICH_PROMPT},
+                {"role": "user", "content": raw},
+            ],
+        )
+        data = _extract_json_object(response.choices[0].message.content or "")
+    except Exception:
+        return {}
+    if not data:
+        return {}
+
+    out: dict = {}
+    title = str(data.get("title") or "").strip()
+    if title and title != raw:
+        out["content"] = title
+    phrase = data.get("deadline")
+    if phrase:
+        try:
+            out["target_date"] = normalize_deadline(str(phrase))
+        except ValueError:
+            pass
+    if data.get("priority") in ("high", "low"):
+        out["priority"] = data["priority"]
+    return out
+
+
 class TaskItem(BaseModel):
     content: str = Field(min_length=1)
     deadline: Optional[str] = None

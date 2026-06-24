@@ -5,8 +5,11 @@ local LLM turns natural language into validated tool calls that mutate a SQLite
 task graph. A handful of **deterministic, no-LLM UI actions** complement it (the
 card complete checkbox, click-navigation, back/forward, and quick-add a task via
 the **+** button / **⌘N**); these are thin endpoints that mutate the graph and
-push state, never going through the model. The **Lens** pane renders cards. No
-cloud, no accounts.
+push state, never going through the model. (Quick-add is the one hybrid: it
+creates the task instantly, then does a *best-effort async LLM enrich* — clean
+title + due date + priority from phrases like "send proposal tomorrow" — and the
+card updates over the WebSocket a beat later, degrading to the raw text when the
+model is offline.) The **Lens** pane renders cards. No cloud, no accounts.
 
 This file is for anyone (human or AI) modifying the code. End users should start
 with `README.md`. Read this before changing the engine — several design rules are

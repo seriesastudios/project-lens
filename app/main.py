@@ -13,7 +13,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel
 
 from app.engine import embeddings, views
-from app.engine.brain import process_user_input_events
+from app.engine.brain import process_user_input_events, enrich_quick_task
 from app.database import models
 
 
@@ -131,9 +131,26 @@ async def create_task(request: NewTaskRequest):
         result = views.add_task(request.content, request.parent_id, request.node_type)
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc))
-    embeddings.index_node(result["node_id"], request.content.strip())
-    await manager.broadcast_state()
+    raw = request.content.strip()
+    embeddings.index_node(result["node_id"], raw)
+    await manager.broadcast_state()                      # card appears instantly
+    # Best-effort LLM cleanup (clean title + date + priority); refines the card a
+    # beat later over the WebSocket, and silently no-ops if the model is offline.
+    asyncio.create_task(_enrich_quick_task(result["node_id"], raw))
     return {"success": True, **result}
+
+
+async def _enrich_quick_task(node_id: int, raw: str):
+    fields = await enrich_quick_task(raw)
+    if not fields:
+        return
+    node = models.get_node(node_id)
+    if not node or node["status"] != "active" or node["content"] != raw:
+        return  # gone, completed, or already edited — don't clobber
+    models.update_node(node_id, **fields)
+    if "content" in fields:
+        embeddings.index_node(node_id, fields["content"])
+    await manager.broadcast_state()
 
 
 @app.get("/api/lens")
